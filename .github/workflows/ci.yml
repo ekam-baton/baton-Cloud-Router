@@ -3,6 +3,7 @@ name: Baton Cloud Router CI/CD
 on:
   push:
     branches: [ "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "main" ]
 
@@ -44,3 +45,4 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/baton-cloud-router:latest
             ghcr.io/${{ github.repository_owner }}/baton-cloud-router:${{ github.sha }}
+
