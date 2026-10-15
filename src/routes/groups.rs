@@ -91,7 +91,7 @@ pub async fn group_join_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
+    let members_json = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
         if group.creator_id != payload.requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can add members").into_response();
         }
@@ -99,21 +99,23 @@ pub async fn group_join_handler(
             return (StatusCode::BAD_REQUEST, "Maximum 10 members per group").into_response();
         }
         group.members.insert(payload.member_id.clone());
-        
-        {
-            let members_json = serde_json::to_string(&group.members).unwrap_or_default();
-            let db = state.db.lock().await;
-            let _ = db.execute(
-                "UPDATE groups SET members_json = ? WHERE group_id = ?",
-                rusqlite::params![members_json, payload.group_id]
-            );
-        }
-        
-        info!("📢 Added {} to group {}", payload.member_id, payload.group_id);
-        StatusCode::OK.into_response()
+        let json = serde_json::to_string(&group.members).unwrap_or_default();
+        drop(group); // Release DashMap lock before async SQLite I/O
+        json
     } else {
-        (StatusCode::NOT_FOUND, "Group not found").into_response()
+        return (StatusCode::NOT_FOUND, "Group not found").into_response();
+    };
+
+    {
+        let db = state.db.lock().await;
+        let _ = db.execute(
+            "UPDATE groups SET members_json = ? WHERE group_id = ?",
+            rusqlite::params![members_json, payload.group_id]
+        );
     }
+
+    info!("📢 Added {} to group {}", payload.member_id, payload.group_id);
+    StatusCode::OK.into_response()
 }
 
 /// `POST /group/leave` — Remove a member from a group (creator or self).
@@ -130,27 +132,29 @@ pub async fn group_leave_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
+    let members_json = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
         // Only the creator can remove others; anyone can remove themselves
         if payload.member_id != payload.requester_id && group.creator_id != payload.requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can remove other members").into_response();
         }
         group.members.remove(&payload.member_id);
-        
-        {
-            let members_json = serde_json::to_string(&group.members).unwrap_or_default();
-            let db = state.db.lock().await;
-            let _ = db.execute(
-                "UPDATE groups SET members_json = ? WHERE group_id = ?",
-                rusqlite::params![members_json, payload.group_id]
-            );
-        }
-        
-        info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
-        StatusCode::OK.into_response()
+        let json = serde_json::to_string(&group.members).unwrap_or_default();
+        drop(group); // Release DashMap lock before async SQLite I/O
+        json
     } else {
-        (StatusCode::NOT_FOUND, "Group not found").into_response()
+        return (StatusCode::NOT_FOUND, "Group not found").into_response();
+    };
+
+    {
+        let db = state.db.lock().await;
+        let _ = db.execute(
+            "UPDATE groups SET members_json = ? WHERE group_id = ?",
+            rusqlite::params![members_json, payload.group_id]
+        );
     }
+
+    info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
+    StatusCode::OK.into_response()
 }
 
 /// `GET /group/{group_id}` — Get group info.
