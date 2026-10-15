@@ -98,6 +98,10 @@ struct Envelope {
     receiver_id: String,
     #[serde(default)]
     sender_id: Option<String>,
+    #[serde(default)]
+    group_id: Option<String>,
+    #[serde(default)]
+    depth: u32,
     #[serde(alias = "payload")]
     payload_encrypted: String, 
 }
@@ -490,6 +494,16 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
 
                     // Sealed Sender: Envelope only requires receiver_id and payload_encrypted
                     if let Ok(mut envelope) = serde_json::from_str::<Envelope>(&text) {
+                        // ── Hard Loop Breaker: Recursion Depth / Hop Limit ───
+                        const MAX_ROUTER_RECURSION_DEPTH: u32 = 3;
+                        if envelope.depth >= MAX_ROUTER_RECURSION_DEPTH {
+                            warn!(
+                                "Cloud Router recursion breaker triggered: depth {} >= limit {} from sender '{}'. Dropping message.",
+                                envelope.depth, MAX_ROUTER_RECURSION_DEPTH, client_id_clone
+                            );
+                            continue;
+                        }
+
                         // ── CR-1 FIX: Force authenticated identity as sender ───
                         // The client CANNOT choose their sender_id. The router
                         // overwrites it with the JWT-authenticated client_id.
@@ -1012,12 +1026,20 @@ mod tests {
         let envelope = Envelope {
             receiver_id: "bob".to_string(),
             sender_id: Some("alice".to_string()),
+            group_id: None,
+            depth: 1,
             payload_encrypted: "hello encrypted world".to_string(),
         };
         let serialized = serde_json::to_string(&envelope).unwrap();
         let deserialized: Envelope = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.receiver_id, "bob");
         assert_eq!(deserialized.sender_id.as_deref(), Some("alice"));
+        assert_eq!(deserialized.depth, 1);
+
+        // Test default depth = 0 when omitted
+        let raw_json = r#"{"receiver_id":"bob","payload":"test"}"#;
+        let from_raw: Envelope = serde_json::from_str(raw_json).unwrap();
+        assert_eq!(from_raw.depth, 0);
     }
 }
 
