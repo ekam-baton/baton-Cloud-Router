@@ -260,11 +260,11 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
         _ = (&mut recv_task) => send_task.abort(),
     };
 
-    // Cleanup when the connection drops
-    if let Some(entry) = state.connections.get(&client_id)
-        && entry.value().1 == conn_id {
-            drop(entry);
-            state.connections.remove(&client_id);
-        }
-    info!("Client {} disconnected and removed from routing table", client_id);
+    // Cleanup when the connection drops (atomic remove_if avoids race condition with fast reconnects)
+    let removed = state.connections.remove_if(&client_id, |_, val| val.1 == conn_id);
+    if removed.is_some() {
+        info!("Client {} connection {} disconnected and removed from routing table", client_id, conn_id);
+    } else {
+        info!("Client {} connection {} disconnected (newer connection retained in routing table)", client_id, conn_id);
+    }
 }
