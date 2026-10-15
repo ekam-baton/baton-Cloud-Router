@@ -32,9 +32,14 @@ use sha1::Sha1;
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
     sub: String,
+    #[serde(default)]
+    exp: Option<usize>,
 }
 
 fn verify_jwt(token: &str, secret: &str, expected_sub: &str) -> bool {
+    if secret.is_empty() || expected_sub.is_empty() {
+        return false;
+    }
     let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_exp = true;
     validation.leeway = 60;
@@ -128,8 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let groups_map = DashMap::new();
-    if let Ok(mut stmt) = db.prepare("SELECT group_id, name, creator_id, members_json, created_at FROM groups") {
-        if let Ok(group_rows) = stmt.query_map([], |row| {
+    if let Ok(mut stmt) = db.prepare("SELECT group_id, name, creator_id, members_json, created_at FROM groups")
+        && let Ok(group_rows) = stmt.query_map([], |row| {
             let group_id: String = row.get(0)?;
             let name: String = row.get(1)?;
             let creator_id: String = row.get(2)?;
@@ -150,7 +155,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-    }
 
     let state = Arc::new(AppState {
         connections: DashMap::new(),
@@ -212,12 +216,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(ConcurrencyLimitLayer::new(10_000))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8082")
+    let bind_addr = std::env::var("ROUTER_BIND")
+        .unwrap_or_else(|_| std::env::var("PORT").map(|p| format!("0.0.0.0:{}", p)).unwrap_or_else(|_| "0.0.0.0:8082".to_string()));
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
         .await?;
     if let Ok(addr) = listener.local_addr() {
         info!("Baton Cloud Router listening on {}", addr);
     } else {
-        info!("Baton Cloud Router listening on 0.0.0.0:8082");
+        info!("Baton Cloud Router listening on {}", bind_addr);
     }
     
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
@@ -427,15 +433,14 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
     let messages_to_send = {
         let db = state.db.lock().await;
         let mut msgs = Vec::new();
-        if let Ok(mut stmt) = db.prepare("SELECT id, payload FROM queued_messages WHERE receiver_id = ? ORDER BY id ASC") {
-            if let Ok(messages) = stmt.query_map([&client_id], |row| {
+        if let Ok(mut stmt) = db.prepare("SELECT id, payload FROM queued_messages WHERE receiver_id = ? ORDER BY id ASC")
+            && let Ok(messages) = stmt.query_map([&client_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             }) {
                 for msg in messages.flatten() {
                     msgs.push(msg);
                 }
             }
-        }
         msgs
     };
 
@@ -607,12 +612,11 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
     };
 
     // Cleanup when the connection drops
-    if let Some(entry) = state.connections.get(&client_id) {
-        if entry.value().1 == conn_id {
+    if let Some(entry) = state.connections.get(&client_id)
+        && entry.value().1 == conn_id {
             drop(entry);
             state.connections.remove(&client_id);
         }
-    }
     info!("Client {} disconnected and removed from routing table", client_id);
 }
 
@@ -867,15 +871,14 @@ async fn group_info_handler(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let mut requester_id = None;
-    if let Some(token) = headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        if let Ok(token_data) = jsonwebtoken::decode::<Claims>(
+    if let Some(token) = headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "))
+        && let Ok(token_data) = jsonwebtoken::decode::<Claims>(
             token,
             &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()),
             &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256)
         ) {
             requester_id = Some(token_data.claims.sub);
         }
-    }
     
     let req_id = match requester_id {
         Some(id) => id,
@@ -966,22 +969,55 @@ async fn group_list_handler(
 
 async fn health_handler(
     State(_state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let has_valid_auth = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(token) => {
-            let secret = std::env::var("JWT_SECRET").unwrap_or_default();
-            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-            validation.validate_exp = true;
-            jsonwebtoken::decode::<Claims>(token, &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()), &validation).is_ok()
-        },
-        None => false,
-    };
+    (StatusCode::OK, Json(serde_json::json!({"status":"ok","service":"cloud-router"}))).into_response()
+}
 
-    if !has_valid_auth {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_verify_jwt_empty_secret_fails() {
+        assert!(!verify_jwt("some.jwt.token", "", "user123"));
+        assert!(!verify_jwt("some.jwt.token", "secret", ""));
     }
 
-    Json(serde_json::json!({"status":"ok","service":"cloud-router"})).into_response()
+    #[test]
+    fn test_verify_jwt_valid_and_mismatched() {
+        let secret = "test-secret-key-for-baton-cloud-router-2026";
+        let claims = Claims {
+            sub: "alice".to_string(),
+            exp: Some(9999999999),
+        };
+        let header = jsonwebtoken::Header { alg: jsonwebtoken::Algorithm::HS256, ..Default::default() };
+        let token = jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
+        ).unwrap();
+
+        // Valid match
+        assert!(verify_jwt(&token, secret, "alice"));
+
+        // Mismatched sub
+        assert!(!verify_jwt(&token, secret, "bob"));
+
+        // Wrong secret
+        assert!(!verify_jwt(&token, "wrong-secret", "alice"));
+    }
+
+    #[test]
+    fn test_message_envelope_serialization() {
+        let envelope = Envelope {
+            receiver_id: "bob".to_string(),
+            sender_id: Some("alice".to_string()),
+            payload_encrypted: "hello encrypted world".to_string(),
+        };
+        let serialized = serde_json::to_string(&envelope).unwrap();
+        let deserialized: Envelope = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.receiver_id, "bob");
+        assert_eq!(deserialized.sender_id.as_deref(), Some("alice"));
+    }
 }
 
