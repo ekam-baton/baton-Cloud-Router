@@ -14,6 +14,7 @@ WORKDIR /app
 COPY --from=builder /usr/src/baton-cloud-router/target/release/baton-Cloud-Router /app/cloud-router
 
 EXPOSE 8082
+EXPOSE 3478/udp
 
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN groupadd -r appuser && useradd -r -g appuser appuser && chown -R appuser:appuser /app

@@ -98,25 +98,24 @@ struct Envelope {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize standard logging
     tracing_subscriber::fmt::init();
 
-    let jwt_secret = std::env::var("JWT_SECRET").expect(
-        "FATAL: JWT_SECRET environment variable is not set. \
-         Generate one with: openssl rand -hex 32"
-    );
+    let jwt_secret = std::env::var("JWT_SECRET").map_err(|_| {
+        "FATAL: JWT_SECRET environment variable is not set. Generate one with: openssl rand -hex 32"
+    })?;
     
-    let db = rusqlite::Connection::open("router_queue.db").expect("Failed to open SQLite database");
+    let db = rusqlite::Connection::open("router_queue.db")?;
     db.execute(
         "CREATE TABLE IF NOT EXISTS queued_messages(id INTEGER PRIMARY KEY, receiver_id TEXT, payload TEXT, created_at INTEGER)",
         (),
-    ).expect("Failed to create table");
+    )?;
     
     db.execute(
         "CREATE TABLE IF NOT EXISTS groups(group_id TEXT PRIMARY KEY, name TEXT DEFAULT '', creator_id TEXT, members_json TEXT, created_at INTEGER DEFAULT 0)",
         (),
-    ).expect("Failed to create groups table");
+    )?;
 
     let groups_map = DashMap::new();
     if let Ok(mut stmt) = db.prepare("SELECT group_id, name, creator_id, members_json, created_at FROM groups") {
@@ -162,6 +161,23 @@ async fn main() {
         }
     });
 
+    // ── HI-6 FIX: Periodic cleanup of stale queued messages (>7 days old) ─────
+    let queue_cleanup = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(3600)).await; // Run every hour
+            let db = queue_cleanup.db.lock().await;
+            let cutoff = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64 - 7 * 86_400 * 1000; // 7 days ago
+            match db.execute("DELETE FROM queued_messages WHERE created_at < ?", [cutoff]) {
+                Ok(n) if n > 0 => info!("🧹 Cleaned up {} stale queued messages", n),
+                _ => {}
+            }
+        }
+    });
+
     // ── Spawn Embedded TURN Relay Listener on port 3478 ────────────────────────
     tokio::spawn(async move {
         start_embedded_turn_server("0.0.0.0:3478").await;
@@ -181,13 +197,13 @@ async fn main() {
         .route("/group/{group_id}", delete(group_delete_handler))
         .route("/groups/{client_id}", get(group_list_handler))
         .route("/turn/credentials", get(turn_credentials_handler))
+        .route("/health", get(health_handler))
         .layer(middleware::from_fn_with_state(state.clone(), ip_rate_limit_middleware))
         .layer(ConcurrencyLimitLayer::new(10_000))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8082")
-        .await
-        .expect("Failed to bind to port 8082. Is it already in use?");
+        .await?;
     if let Ok(addr) = listener.local_addr() {
         info!("Baton Cloud Router listening on {}", addr);
     } else {
@@ -195,8 +211,9 @@ async fn main() {
     }
     
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .expect("Failed to start Axum server");
+        .await?;
+        
+    Ok(())
 }
 
 /// IP Rate Limiter Middleware (DDoS Prevention)
@@ -269,9 +286,12 @@ async fn turn_credentials_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let shared_secret = std::env::var("TURN_SHARED_SECRET").unwrap_or_else(|_| "baton-turn-secret-12345".to_string());
+    let shared_secret = match std::env::var("TURN_SHARED_SECRET") {
+        Ok(secret) => secret,
+        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "TURN_SHARED_SECRET must be set").into_response(),
+    };
     
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 86400; // 24h validity
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() + 86400; // 24h validity
     let username = format!("{}:{}", timestamp, uuid::Uuid::new_v4());
     
     type HmacSha1 = Hmac<Sha1>;
@@ -437,12 +457,31 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
 
     // Task 2: Listen for incoming messages from this WebSocket and route them.
     let state_clone = state.clone();
+    let client_id_clone = client_id.clone();
+    let mut msg_count: u32 = 0;
+    let mut msg_window_start = Instant::now();
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
+                    // ── CR-2 FIX: Per-connection message rate limiting ──────────
+                    msg_count += 1;
+                    if msg_window_start.elapsed() > Duration::from_secs(1) {
+                        msg_count = 1;
+                        msg_window_start = Instant::now();
+                    } else if msg_count > 100 {
+                        warn!("WebSocket rate limit exceeded for client {}, disconnecting", client_id_clone);
+                        break;
+                    }
+
                     // Sealed Sender: Envelope only requires receiver_id and payload_encrypted
-                    if let Ok(envelope) = serde_json::from_str::<Envelope>(&text) {
+                    if let Ok(mut envelope) = serde_json::from_str::<Envelope>(&text) {
+                        // ── CR-1 FIX: Force authenticated identity as sender ───
+                        // The client CANNOT choose their sender_id. The router
+                        // overwrites it with the JWT-authenticated client_id.
+                        envelope.sender_id = Some(client_id_clone.clone());
+                        let authenticated_text: String = serde_json::to_string(&envelope).unwrap_or_else(|_| text.to_string());
+
                         // ── Group Fan-Out Routing (Pillar 3 — V2) ──────────────────
                         if envelope.receiver_id.starts_with("group:") {
                             let group_id = envelope.receiver_id.strip_prefix("group:").unwrap_or("");
@@ -454,43 +493,47 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
                                 .map(|g| g.members.clone());
                             
                             if let Some(members) = members {
-                                // Parse the group payload map: { "member_id": "encrypted_for_member", ... }
                                 let sender = envelope.sender_id.as_deref().unwrap_or("");
                                 
-                                // Fan out: send each member the opaque envelope without inspecting/modifying payload
-                                for member_id in &members {
-                                    if member_id == sender { continue; }
-                                    
-                                    let dest_tx_opt = state_clone.connections
-                                        .get(member_id)
-                                        .map(|c| c.value().0.clone());
-                                    
-                                    if let Some(dest_tx) = dest_tx_opt {
-                                        let _ = dest_tx.send(Message::Text(text.clone().into())).await;
-                                    } else {
-                                        // Offline member — FCM wakeup and queue message
-                                        {
-                                            let db = state_clone.db.lock().await;
-                                            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-                                            let count: i64 = db.query_row(
-                                                "SELECT COUNT(*) FROM queued_messages WHERE receiver_id = ?1",
-                                                [member_id],
-                                                |row| row.get(0),
-                                            ).unwrap_or(0);
+                                // ── HI-4 FIX: Verify sender is a group member ──────
+                                if !members.contains(sender) {
+                                    warn!("Non-member {} tried to message group {}, dropping", sender, group_id);
+                                } else {
+                                    // Fan out: send each member the opaque envelope without inspecting/modifying payload
+                                    for member_id in &members {
+                                        if member_id == sender { continue; }
+                                        
+                                        let dest_tx_opt = state_clone.connections
+                                            .get(member_id)
+                                            .map(|c| c.value().0.clone());
+                                        
+                                        if let Some(dest_tx) = dest_tx_opt {
+                                            let _ = dest_tx.send(Message::Text(authenticated_text.clone().into())).await;
+                                        } else {
+                                            // Offline member — FCM wakeup and queue message
+                                            {
+                                                let db = state_clone.db.lock().await;
+                                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                                                let count: i64 = db.query_row(
+                                                    "SELECT COUNT(*) FROM queued_messages WHERE receiver_id = ?1",
+                                                    [member_id],
+                                                    |row| row.get(0),
+                                                ).unwrap_or(0);
 
-                                            if count >= 1000 {
-                                                warn!("Queue full for client {}, dropping message", member_id);
-                                            } else {
-                                                let _ = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![member_id, text.to_string(), now]);
+                                                if count >= 1000 {
+                                                    warn!("Queue full for client {}, dropping message", member_id);
+                                                } else {
+                                                    let _ = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![member_id, &authenticated_text, now]);
+                                                }
                                             }
-                                        }
 
-                                        if let Some(fcm_token) = state_clone.push_tokens.get(member_id).map(|t| t.clone()) {
-                                            let http = state_clone.http.clone();
-                                            let server_key = state_clone.firebase_server_key.clone();
-                                            tokio::spawn(async move {
-                                                send_fcm_wakeup(&http, server_key.as_deref(), &fcm_token).await;
-                                            });
+                                            if let Some(fcm_token) = state_clone.push_tokens.get(member_id).map(|t| t.clone()) {
+                                                let http = state_clone.http.clone();
+                                                let server_key = state_clone.firebase_server_key.clone();
+                                                tokio::spawn(async move {
+                                                    send_fcm_wakeup(&http, server_key.as_deref(), &fcm_token).await;
+                                                });
+                                            }
                                         }
                                     }
                                 }
@@ -506,8 +549,8 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
                             let dest_tx_opt = state_clone.connections.get(&envelope.receiver_id).map(|c| c.value().0.clone());
                             
                             if let Some(dest_tx) = dest_tx_opt {
-                                // Forward the exact raw JSON string without holding the lock
-                                let _ = dest_tx.send(Message::Text(text.clone().into())).await;
+                                // Forward the authenticated envelope (sender_id enforced by router)
+                                let _ = dest_tx.send(Message::Text(authenticated_text.clone().into())).await;
                             } else {
                                 // Client is offline — fire a blank FCM wakeup (Pillar 1 — V2)
                                 {
@@ -522,7 +565,7 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
                                     if count >= 1000 {
                                         warn!("Queue full for client {}, dropping message", envelope.receiver_id);
                                     } else {
-                                        let _ = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![&envelope.receiver_id, text.to_string(), now]);
+                                        let _ = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![&envelope.receiver_id, &authenticated_text, now]);
                                     }
                                 }
 
@@ -910,4 +953,26 @@ async fn group_list_handler(
     (StatusCode::OK, Json(json_val)).into_response()
 }
 
+
+
+async fn health_handler(
+    State(_state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let has_valid_auth = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(token) => {
+            let secret = std::env::var("JWT_SECRET").unwrap_or_default();
+            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+            validation.validate_exp = true;
+            jsonwebtoken::decode::<Claims>(token, &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()), &validation).is_ok()
+        },
+        None => false,
+    };
+
+    if !has_valid_auth {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
+    Json(serde_json::json!({"status":"ok","service":"cloud-router"})).into_response()
+}
 
