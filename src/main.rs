@@ -111,6 +111,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "CREATE TABLE IF NOT EXISTS queued_messages(id INTEGER PRIMARY KEY, receiver_id TEXT, payload TEXT, created_at INTEGER)",
         (),
     )?;
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queued_messages_receiver ON queued_messages(receiver_id, id)",
+        (),
+    )?;
+    // Prune queued messages older than 7 days on startup
+    let seven_days_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64 - (7 * 86400 * 1000);
+    let _ = db.execute("DELETE FROM queued_messages WHERE created_at < ?1", rusqlite::params![seven_days_ago]);
     
     db.execute(
         "CREATE TABLE IF NOT EXISTS groups(group_id TEXT PRIMARY KEY, name TEXT DEFAULT '', creator_id TEXT, members_json TEXT, created_at INTEGER DEFAULT 0)",
@@ -326,7 +336,7 @@ async fn start_embedded_turn_server(bind_addr: &str) {
     loop {
         if let Ok((len, src)) = socket.recv_from(&mut buf).await {
             // STUN / TURN packet processing header check (Magic Cookie 0x2112A442)
-            if len >= 20 && &buf[4..8] == &[0x21, 0x12, 0xA4, 0x42] {
+            if len >= 20 && buf[4..8] == [0x21, 0x12, 0xA4, 0x42] {
                 // Respond with STUN Binding Success Response
                 let mut resp = vec![0x01, 0x01, 0x00, 0x00]; // Binding Success Response
                 resp.extend_from_slice(&buf[4..20]); // Copy transaction ID
@@ -417,7 +427,7 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
     let messages_to_send = {
         let db = state.db.lock().await;
         let mut msgs = Vec::new();
-        if let Ok(mut stmt) = db.prepare("SELECT id, payload FROM queued_messages WHERE receiver_id = ?") {
+        if let Ok(mut stmt) = db.prepare("SELECT id, payload FROM queued_messages WHERE receiver_id = ? ORDER BY id ASC") {
             if let Ok(messages) = stmt.query_map([&client_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             }) {
@@ -438,7 +448,6 @@ async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState
         }
         let state_clone = state.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(2)).await;
             let db = state_clone.db.lock().await;
             for id in ids_to_delete {
                 let _ = db.execute("DELETE FROM queued_messages WHERE id = ?", [id]);
@@ -665,7 +674,7 @@ async fn send_fcm_wakeup(http: &reqwest::Client, server_key: Option<&str>, fcm_t
     });
 
     match http
-        .post(&format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id))
+        .post(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id))
         .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
         .json(&body)
