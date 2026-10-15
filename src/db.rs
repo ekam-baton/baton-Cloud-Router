@@ -11,6 +11,11 @@ use crate::state::AppState;
 
 pub fn init_db(db_path: &str) -> Result<(Connection, DashMap<String, GroupInfo>), Box<dyn std::error::Error>> {
     let db = Connection::open(db_path)?;
+    let _ = db.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
+    );
     db.execute(
         "CREATE TABLE IF NOT EXISTS queued_messages(id INTEGER PRIMARY KEY, receiver_id TEXT, payload TEXT, created_at INTEGER)",
         (),
