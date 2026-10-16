@@ -42,6 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "FATAL: JWT_SECRET environment variable is not set. Generate one with: openssl rand -hex 32"
     })?;
 
+    let trusted_proxy_ips: Vec<std::net::IpAddr> = std::env::var("TRUSTED_PROXY_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|s| s.trim().parse::<std::net::IpAddr>().ok())
+        .collect();
+    let rate_limit_rpm: u32 = std::env::var("RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(200);
+
     let (db, groups_map) = init_db("router_queue.db")?;
 
     let state = Arc::new(AppState {
@@ -53,6 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         firebase_server_key: std::env::var("FIREBASE_SERVER_KEY").ok(),
         jwt_secret,
         db: Arc::new(tokio::sync::Mutex::new(db)),
+        trusted_proxy_ips,
+        rate_limit_rpm,
     });
 
     // Background Task: Periodic rate limiter IP cache eviction
@@ -101,7 +113,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Baton Cloud Router listening on {}", bind_addr);
     }
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(async {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Shutting down Baton Cloud Router gracefully...");
+        })
+        .await?;
 
     Ok(())
 }

@@ -24,6 +24,10 @@ pub fn init_db(db_path: &str) -> Result<(Connection, DashMap<String, GroupInfo>)
         "CREATE INDEX IF NOT EXISTS idx_queued_messages_receiver ON queued_messages(receiver_id, id)",
         (),
     )?;
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_queued_messages_created_at ON queued_messages(created_at)",
+        (),
+    )?;
     
     // Prune queued messages older than 7 days on startup
     let seven_days_ago = SystemTime::now()

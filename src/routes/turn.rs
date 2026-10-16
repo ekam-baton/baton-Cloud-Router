@@ -1,19 +1,24 @@
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac, KeyInit};
 use sha1::Sha1;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 use crate::models::{Claims, TurnCredentialsResponse};
+use crate::state::AppState;
 
 pub async fn turn_credentials_handler(
+    State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let token = headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "));
     let is_valid_token = if let Some(t) = token {
-        let secret = std::env::var("JWT_SECRET").unwrap_or_default();
-        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-        validation.validate_exp = true;
-        jsonwebtoken::decode::<Claims>(t, &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()), &validation).is_ok()
+        if state.jwt_secret.is_empty() {
+            false
+        } else {
+            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+            validation.validate_exp = true;
+            jsonwebtoken::decode::<Claims>(t, &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()), &validation).is_ok()
+        }
     } else {
         false
     };

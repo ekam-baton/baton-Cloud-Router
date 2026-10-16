@@ -15,9 +15,9 @@ pub async fn start_embedded_turn_server(bind_addr: &str) {
     let mut buf = [0u8; 4096];
     loop {
         if let Ok((len, src)) = socket.recv_from(&mut buf).await {
-            // STUN / TURN packet processing header check (Magic Cookie 0x2112A442)
-            if len >= 20 && buf[4..8] == [0x21, 0x12, 0xA4, 0x42] {
-                // Respond with STUN Binding Success Response
+            // STUN packet processing: verify header, Binding Request (0x0001), and Magic Cookie (0x2112A442)
+            if len >= 20 && buf[0..2] == [0x00, 0x01] && buf[4..8] == [0x21, 0x12, 0xA4, 0x42] {
+                // Respond with STUN Binding Success Response (0x0101)
                 let mut resp = vec![0x01, 0x01, 0x00, 0x00]; // Binding Success Response
                 resp.extend_from_slice(&buf[4..20]); // Copy transaction ID
                 

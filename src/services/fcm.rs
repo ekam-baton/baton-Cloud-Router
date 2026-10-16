@@ -30,6 +30,7 @@ pub async fn send_fcm_wakeup(http: &HttpClient, server_key: Option<&str>, fcm_to
         .post(format!("https://fcm.googleapis.com/v1/projects/{}/messages:send", project_id))
         .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
+        .timeout(std::time::Duration::from_secs(5))
         .json(&body)
         .send()
         .await

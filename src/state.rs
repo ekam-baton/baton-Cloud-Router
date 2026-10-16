@@ -25,4 +25,6 @@ pub struct AppState {
     pub firebase_server_key: Option<String>,
     pub jwt_secret: String,
     pub db: Arc<tokio::sync::Mutex<rusqlite::Connection>>,
+    pub trusted_proxy_ips: Vec<IpAddr>,
+    pub rate_limit_rpm: u32,
 }

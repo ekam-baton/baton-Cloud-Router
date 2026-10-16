@@ -66,7 +66,7 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
 
     // Register this connection in the global map.
     let conn_id = uuid::Uuid::new_v4().to_string();
-    state.connections.insert(client_id.clone(), (tx, conn_id.clone()));
+    state.connections.insert(client_id.clone(), (tx.clone(), conn_id.clone()));
     info!("Registered client {} for routing", client_id);
 
     let messages_to_send = {
@@ -139,6 +139,9 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                             continue;
                         }
 
+                        // ── Hard Loop Breaker: Increment and Enforce Hop Limit ───
+                        envelope.depth += 1;
+
                         // ── CR-1 FIX: Force authenticated identity as sender ───
                         // The client CANNOT choose their sender_id. The router
                         // overwrites it with the JWT-authenticated client_id.
@@ -170,10 +173,14 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                                             .get(member_id)
                                             .map(|c| c.value().0.clone());
                                         
-                                        if let Some(dest_tx) = dest_tx_opt {
-                                            let _ = dest_tx.send(Message::Text(authenticated_text.clone().into())).await;
+                                        let delivered = if let Some(dest_tx) = dest_tx_opt {
+                                            dest_tx.try_send(Message::Text(authenticated_text.clone().into())).is_ok()
                                         } else {
-                                            // Offline member — FCM wakeup and queue message
+                                            false
+                                        };
+
+                                        if !delivered {
+                                            // Offline member or channel buffer full — FCM wakeup and queue message
                                             {
                                                 let db = state_clone.db.lock().await;
                                                 let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
@@ -211,11 +218,14 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                             // Look up the destination connection and clone the sender to drop the DashMap lock
                             let dest_tx_opt = state_clone.connections.get(&envelope.receiver_id).map(|c| c.value().0.clone());
                             
-                            if let Some(dest_tx) = dest_tx_opt {
-                                // Forward the authenticated envelope (sender_id enforced by router)
-                                let _ = dest_tx.send(Message::Text(authenticated_text.clone().into())).await;
+                            let delivered = if let Some(dest_tx) = dest_tx_opt {
+                                dest_tx.try_send(Message::Text(authenticated_text.clone().into())).is_ok()
                             } else {
-                                // Client is offline — fire a blank FCM wakeup (Pillar 1 — V2)
+                                false
+                            };
+
+                            if !delivered {
+                                // Client is offline or buffer full — fire a blank FCM wakeup (Pillar 1 — V2)
                                 {
                                     let db = state_clone.db.lock().await;
                                     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
@@ -232,7 +242,7 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                                     }
                                 }
 
-                                info!("Offline client detected. Sending blank FCM wakeup.");
+                                info!("Offline client or saturated channel detected. Sending blank FCM wakeup.");
                                 if let Some(fcm_token) = state_clone.push_tokens.get(&envelope.receiver_id).map(|t| t.clone()) {
                                     let http = state_clone.http.clone();
                                     let server_key = state_clone.firebase_server_key.clone();
@@ -249,7 +259,10 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                     }
                 }
                 Message::Close(_) => break,
-                _ => {} // Ignore ping/pong/binary for now
+                Message::Ping(data) => {
+                    let _ = tx.try_send(Message::Pong(data));
+                }
+                _ => {} // Ignore unhandled frames
             }
         }
     });

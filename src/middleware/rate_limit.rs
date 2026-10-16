@@ -19,13 +19,7 @@ pub async fn ip_rate_limit_middleware(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let trusted_proxies: Vec<IpAddr> = std::env::var("TRUSTED_PROXY_IPS")
-        .unwrap_or_default()
-        .split(',')
-        .filter_map(|s| s.trim().parse::<IpAddr>().ok())
-        .collect();
-
-    let ip = if trusted_proxies.contains(&addr.ip()) {
+    let ip = if state.trusted_proxy_ips.contains(&addr.ip()) {
         // Only trust forwarded headers from known proxies
         req.headers()
             .get("cf-connecting-ip")
@@ -38,20 +32,25 @@ pub async fn ip_rate_limit_middleware(
         addr.ip()
     };
     let now = Instant::now();
-    
-    let mut entry = state.rate_limiter.entry(ip).or_insert((0, now));
-    let (count, window_start) = entry.value_mut();
 
-    let limit = std::env::var("RATE_LIMIT_RPM").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(200);
-    if now.duration_since(*window_start) > Duration::from_secs(60) {
-        *count = 1;
-        *window_start = now;
-    } else {
-        *count += 1;
-        if *count > limit {
-            warn!("DDoS Mitigation: Rate limit exceeded for IP {}", ip);
-            return Err(StatusCode::TOO_MANY_REQUESTS);
+    // Perform rate check and immediately drop the DashMap guard before any .await
+    let rate_exceeded = {
+        let mut entry = state.rate_limiter.entry(ip).or_insert((0, now));
+        let (count, window_start) = entry.value_mut();
+
+        if now.duration_since(*window_start) > Duration::from_secs(60) {
+            *count = 1;
+            *window_start = now;
+            false
+        } else {
+            *count += 1;
+            *count > state.rate_limit_rpm
         }
+    }; // DashMap shard lock dropped here — safe to .await below
+
+    if rate_exceeded {
+        warn!("DDoS Mitigation: Rate limit exceeded for IP {}", ip);
+        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
     Ok(next.run(req).await)
