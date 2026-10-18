@@ -3,7 +3,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use hmac::{Hmac, Mac, KeyInit};
 use sha1::Sha1;
 use std::{sync::Arc, time::{SystemTime, UNIX_EPOCH}};
-use crate::models::{Claims, TurnCredentialsResponse};
+use crate::auth::decode_jwt_sub;
+use crate::models::TurnCredentialsResponse;
 use crate::state::AppState;
 
 pub async fn turn_credentials_handler(
@@ -11,19 +12,8 @@ pub async fn turn_credentials_handler(
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     let token = headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "));
-    let is_valid_token = if let Some(t) = token {
-        if state.jwt_secret.is_empty() {
-            false
-        } else {
-            let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
-            validation.validate_exp = true;
-            jsonwebtoken::decode::<Claims>(t, &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()), &validation).is_ok()
-        }
-    } else {
-        false
-    };
-
-    if !is_valid_token {
+    let sub = token.and_then(|t| decode_jwt_sub(t, &state.jwt_secret));
+    if sub.is_none() {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
@@ -45,8 +35,8 @@ pub async fn turn_credentials_handler(
         password,
         ttl: 86400,
         uris: vec![
+            "turn:router.baton.com:3478?transport=udp".to_string(),
             "turn:router.baton.com:3478".to_string(),
-            "turn:router.baton.com:3478?transport=tcp".to_string(),
         ],
     }).into_response()
 }
