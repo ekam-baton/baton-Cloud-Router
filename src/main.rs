@@ -208,4 +208,26 @@ mod tests {
         };
         assert!(!valid_envelope.receiver_id.trim().is_empty() && valid_envelope.receiver_id.len() <= 128);
     }
+
+    #[test]
+    fn test_push_token_bounds() {
+        let req_valid = crate::models::RegisterPushRequest {
+            client_id: "client-1".to_string(),
+            fcm_token: "fcm-valid-token-123".to_string(),
+        };
+        assert!(!req_valid.client_id.trim().is_empty() && req_valid.client_id.len() <= 128);
+        assert!(!req_valid.fcm_token.trim().is_empty() && req_valid.fcm_token.len() <= 4096);
+
+        let req_oversized_client = crate::models::RegisterPushRequest {
+            client_id: "c".repeat(129),
+            fcm_token: "token".to_string(),
+        };
+        assert!(req_oversized_client.client_id.len() > 128);
+
+        let req_oversized_token = crate::models::RegisterPushRequest {
+            client_id: "client-1".to_string(),
+            fcm_token: "t".repeat(4097),
+        };
+        assert!(req_oversized_token.fcm_token.len() > 4096);
+    }
 }

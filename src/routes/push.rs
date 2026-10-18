@@ -21,10 +21,13 @@ pub async fn register_push_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if payload.client_id.is_empty() || payload.fcm_token.is_empty() {
-        return (StatusCode::BAD_REQUEST, "client_id and fcm_token required").into_response();
+    let client_id = payload.client_id.trim();
+    let fcm_token = payload.fcm_token.trim();
+
+    if client_id.is_empty() || client_id.len() > 128 || fcm_token.is_empty() || fcm_token.len() > 4096 {
+        return (StatusCode::BAD_REQUEST, "Invalid client_id or fcm_token bounds").into_response();
     }
-    state.push_tokens.insert(payload.client_id.clone(), payload.fcm_token);
-    info!("📲 Registered FCM push token for client {}", payload.client_id);
+    state.push_tokens.insert(client_id.to_string(), fcm_token.to_string());
+    info!("📲 Registered FCM push token for client {}", client_id);
     StatusCode::OK.into_response()
 }
