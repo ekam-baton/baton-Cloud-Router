@@ -82,7 +82,7 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
     let messages_to_send = {
         let db = state.db.lock().await;
         let mut msgs = Vec::new();
-        if let Ok(mut stmt) = db.prepare("SELECT id, payload FROM queued_messages WHERE receiver_id = ? ORDER BY id ASC")
+        if let Ok(mut stmt) = db.prepare("SELECT id, payload FROM queued_messages WHERE receiver_id = ? ORDER BY id ASC LIMIT 250")
             && let Ok(messages) = stmt.query_map([&client_id], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             }) {
@@ -100,13 +100,17 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                 ids_to_delete.push(id);
             }
         }
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let db = state_clone.db.lock().await;
-            for id in ids_to_delete {
-                let _ = db.execute("DELETE FROM queued_messages WHERE id = ?", [id]);
-            }
-        });
+        if let Some(&max_id) = ids_to_delete.last() {
+            let state_clone = state.clone();
+            let client_id_del = client_id.clone();
+            tokio::spawn(async move {
+                let db = state_clone.db.lock().await;
+                let _ = db.execute(
+                    "DELETE FROM queued_messages WHERE receiver_id = ?1 AND id <= ?2",
+                    rusqlite::params![&client_id_del, max_id],
+                );
+            });
+        }
     }
 
     // Task 1: Forward messages from the MPSC channel into the actual WebSocket,
