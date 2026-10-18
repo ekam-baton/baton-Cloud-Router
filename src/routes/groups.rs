@@ -118,6 +118,9 @@ pub async fn group_join_handler(
         if group.creator_id != payload.requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can add members").into_response();
         }
+        if group.members.contains(&payload.member_id) {
+            return (StatusCode::OK, "Member already in group").into_response();
+        }
         if group.members.len() >= 10 {
             return (StatusCode::BAD_REQUEST, "Maximum 10 members per group").into_response();
         }
@@ -160,28 +163,33 @@ pub async fn group_leave_handler(
         return (StatusCode::BAD_REQUEST, "Invalid member_id or group_id").into_response();
     }
 
-    let members_json = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
+    let (members_json, is_empty) = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
         // Only the creator can remove others; anyone can remove themselves
         if payload.member_id != payload.requester_id && group.creator_id != payload.requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can remove other members").into_response();
         }
         group.members.remove(&payload.member_id);
+        let empty = group.members.is_empty();
         let json = serde_json::to_string(&group.members).unwrap_or_default();
         drop(group); // Release DashMap lock before async SQLite I/O
-        json
+        (json, empty)
     } else {
         return (StatusCode::NOT_FOUND, "Group not found").into_response();
     };
 
-    {
+    if is_empty {
+        state.groups.remove(&payload.group_id);
+        let db = state.db.lock().await;
+        let _ = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![payload.group_id]);
+        info!("📢 Group {} is now empty — automatically deleted", payload.group_id);
+    } else {
         let db = state.db.lock().await;
         let _ = db.execute(
             "UPDATE groups SET members_json = ? WHERE group_id = ?",
             rusqlite::params![members_json, payload.group_id]
         );
+        info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
     }
-
-    info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
     StatusCode::OK.into_response()
 }
 
