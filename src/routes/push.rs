@@ -27,7 +27,21 @@ pub async fn register_push_handler(
     if client_id.is_empty() || client_id.len() > 128 || fcm_token.is_empty() || fcm_token.len() > 4096 {
         return (StatusCode::BAD_REQUEST, "Invalid client_id or fcm_token bounds").into_response();
     }
-    state.push_tokens.insert(client_id.to_string(), fcm_token.to_string());
+    let client_id_str = client_id.to_string();
+    let fcm_token_str = fcm_token.to_string();
+    state.push_tokens.insert(client_id_str.clone(), fcm_token_str.clone());
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        let db = state_clone.db.lock().await;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+        let _ = db.execute(
+            "INSERT INTO push_tokens (client_id, fcm_token, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(client_id) DO UPDATE SET fcm_token = excluded.fcm_token, updated_at = excluded.updated_at",
+            rusqlite::params![client_id_str, fcm_token_str, now],
+        );
+    });
+
     info!("📲 Registered FCM push token for client {}", client_id);
     StatusCode::OK.into_response()
 }

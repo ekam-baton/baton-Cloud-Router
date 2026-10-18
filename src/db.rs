@@ -9,7 +9,7 @@ use tracing::info;
 use crate::models::GroupInfo;
 use crate::state::AppState;
 
-pub fn init_db(db_path: &str) -> Result<(Connection, DashMap<String, GroupInfo>), Box<dyn std::error::Error>> {
+pub fn init_db(db_path: &str) -> Result<(Connection, DashMap<String, GroupInfo>, DashMap<String, String>), Box<dyn std::error::Error>> {
     let db = Connection::open(db_path)?;
     let _ = db.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -65,7 +65,26 @@ pub fn init_db(db_path: &str) -> Result<(Connection, DashMap<String, GroupInfo>)
             }
         }
 
-    Ok((db, groups_map))
+    // Persist push tokens across server restarts
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS push_tokens(client_id TEXT PRIMARY KEY, fcm_token TEXT, updated_at INTEGER)",
+        (),
+    )?;
+
+    let push_tokens_map = DashMap::new();
+    if let Ok(mut stmt) = db.prepare("SELECT client_id, fcm_token FROM push_tokens")
+        && let Ok(token_rows) = stmt.query_map([], |row| {
+            let client_id: String = row.get(0)?;
+            let fcm_token: String = row.get(1)?;
+            Ok((client_id, fcm_token))
+        }) {
+            for row in token_rows.flatten() {
+                let (client_id, fcm_token) = row;
+                push_tokens_map.insert(client_id, fcm_token);
+            }
+        }
+
+    Ok((db, groups_map, push_tokens_map))
 }
 
 pub fn spawn_queue_cleanup(state: Arc<AppState>) {

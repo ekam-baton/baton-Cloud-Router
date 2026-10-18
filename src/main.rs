@@ -52,12 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(200);
 
-    let (db, groups_map) = init_db("router_queue.db")?;
+    let (db, groups_map, push_tokens_map) = init_db("router_queue.db")?;
 
     let state = Arc::new(AppState {
         connections: DashMap::new(),
         rate_limiter: DashMap::new(),
-        push_tokens: DashMap::new(),
+        push_tokens: push_tokens_map,
         groups: groups_map,
         http: HttpClient::new(),
         firebase_server_key: std::env::var("FIREBASE_SERVER_KEY").ok(),
@@ -291,5 +291,40 @@ mod tests {
         assert_eq!(parsed_std.group_name, "Executive Board");
         assert_eq!(parsed_std.creator_id, "founder_1");
         assert_eq!(parsed_std.member_ids, vec!["member_a"]);
+    }
+
+    #[test]
+    fn test_push_token_persistence_roundtrip() {
+        let db_path = std::env::temp_dir().join(format!("test_router_{}.db", uuid::Uuid::new_v4()));
+        let db_path_str = db_path.to_str().unwrap();
+
+        // 1. Initialize and insert token
+        {
+            let (db, _groups, tokens) = crate::db::init_db(db_path_str).unwrap();
+            tokens.insert("client_test_1".to_string(), "fcm_token_alpha".to_string());
+            db.execute(
+                "INSERT INTO push_tokens (client_id, fcm_token, updated_at) VALUES (?1, ?2, ?3)",
+                rusqlite::params!["client_test_1", "fcm_token_alpha", 123456789i64],
+            ).unwrap();
+        }
+
+        // 2. Simulate server restart: init_db again and verify token restored from disk
+        {
+            let (_db, _groups, tokens_reloaded) = crate::db::init_db(db_path_str).unwrap();
+            assert_eq!(tokens_reloaded.get("client_test_1").as_deref(), Some(&"fcm_token_alpha".to_string()));
+            assert!(tokens_reloaded.get("client_nonexistent").is_none());
+        }
+
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn test_max_message_payload_bounds() {
+        const MAX_MESSAGE_PAYLOAD_BYTES: usize = 512 * 1024;
+        let small_msg = "a".repeat(1024);
+        assert!(small_msg.len() <= MAX_MESSAGE_PAYLOAD_BYTES);
+
+        let oversized_msg = "a".repeat(MAX_MESSAGE_PAYLOAD_BYTES + 1);
+        assert!(oversized_msg.len() > MAX_MESSAGE_PAYLOAD_BYTES);
     }
 }

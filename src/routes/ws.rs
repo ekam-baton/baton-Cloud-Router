@@ -137,6 +137,16 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
         while let Some(Ok(msg)) = receiver.next().await {
             match msg {
                 Message::Text(text) => {
+                    // Enforce maximum payload size limit (512 KB max) to prevent memory & DB exhaustion
+                    const MAX_MESSAGE_PAYLOAD_BYTES: usize = 512 * 1024;
+                    if text.len() > MAX_MESSAGE_PAYLOAD_BYTES {
+                        warn!(
+                            "Oversized WebSocket message payload ({} bytes > {} max) from client {}. Dropping.",
+                            text.len(), MAX_MESSAGE_PAYLOAD_BYTES, client_id_clone
+                        );
+                        continue;
+                    }
+
                     // ── CR-2 FIX: Per-connection message rate limiting ──────────
                     msg_count += 1;
                     if msg_window_start.elapsed() > Duration::from_secs(1) {
