@@ -80,11 +80,11 @@ pub async fn group_create_handler(
         let db = state.db.lock().await;
         let _ = db.execute(
             "INSERT INTO groups (group_id, name, creator_id, members_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![group_id, payload.group_name, payload.creator_id, members_json, now as i64]
+            rusqlite::params![group_id, payload.group_name, creator_id, members_json, now as i64]
         );
     }
     
-    info!("📢 Group '{}' ({}) created by {} with {} members", payload.group_name, group_id, payload.creator_id, members.len());
+    info!("📢 Group '{}' ({}) created by {} with {} members", payload.group_name, group_id, creator_id, members.len());
 
     let response = GroupCreateResponse {
         group_id,
