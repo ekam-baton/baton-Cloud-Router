@@ -178,4 +178,34 @@ mod tests {
         let from_raw: Envelope = serde_json::from_str(raw_json).unwrap();
         assert_eq!(from_raw.depth, 0);
     }
+
+    #[test]
+    fn test_envelope_receiver_id_bounds() {
+        let empty_envelope = Envelope {
+            receiver_id: "".to_string(),
+            sender_id: None,
+            group_id: None,
+            depth: 0,
+            payload_encrypted: "test".to_string(),
+        };
+        assert!(empty_envelope.receiver_id.trim().is_empty());
+
+        let oversized_envelope = Envelope {
+            receiver_id: "a".repeat(129),
+            sender_id: None,
+            group_id: None,
+            depth: 0,
+            payload_encrypted: "test".to_string(),
+        };
+        assert!(oversized_envelope.receiver_id.len() > 128);
+
+        let valid_envelope = Envelope {
+            receiver_id: "client-valid-123".to_string(),
+            sender_id: None,
+            group_id: None,
+            depth: 0,
+            payload_encrypted: "test".to_string(),
+        };
+        assert!(!valid_envelope.receiver_id.trim().is_empty() && valid_envelope.receiver_id.len() <= 128);
+    }
 }

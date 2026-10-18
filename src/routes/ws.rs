@@ -129,6 +129,15 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
 
                     // Sealed Sender: Envelope only requires receiver_id and payload_encrypted
                     if let Ok(mut envelope) = serde_json::from_str::<Envelope>(&text) {
+                        // Validate receiver_id format and bounds
+                        if envelope.receiver_id.trim().is_empty() || envelope.receiver_id.len() > 128 {
+                            warn!(
+                                "Malformed or oversized receiver_id '{}' from sender '{}'. Dropping message.",
+                                envelope.receiver_id, client_id_clone
+                            );
+                            continue;
+                        }
+
                         // ── Hard Loop Breaker: Recursion Depth / Hop Limit ───
                         const MAX_ROUTER_RECURSION_DEPTH: u32 = 3;
                         if envelope.depth >= MAX_ROUTER_RECURSION_DEPTH {
