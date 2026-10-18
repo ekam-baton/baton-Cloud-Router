@@ -220,7 +220,17 @@ pub async fn group_delete_handler(
     headers: axum::http::HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
-    let requester = params.get("creator_id").cloned().unwrap_or_default();
+    let requester = if let Some(c) = params.get("creator_id").filter(|s| !s.trim().is_empty()) {
+        c.clone()
+    } else if let Some(sub) = headers.get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .and_then(|t| decode_jwt_sub(t, &state.jwt_secret)) {
+        sub
+    } else {
+        String::new()
+    };
+
     if requester.trim().is_empty() || requester.len() > 128 || group_id.trim().is_empty() || group_id.len() > 128 {
         return (StatusCode::BAD_REQUEST, "Invalid parameters").into_response();
     }

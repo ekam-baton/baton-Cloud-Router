@@ -327,4 +327,35 @@ mod tests {
         let oversized_msg = "a".repeat(MAX_MESSAGE_PAYLOAD_BYTES + 1);
         assert!(oversized_msg.len() > MAX_MESSAGE_PAYLOAD_BYTES);
     }
+
+    #[test]
+    fn test_ack_messages_up_to_id_bounded_deletion() {
+        let db_path = std::env::temp_dir().join(format!("test_ack_{}.db", uuid::Uuid::new_v4()));
+        let db_path_str = db_path.to_str().unwrap();
+
+        let (db, _groups, _tokens) = crate::db::init_db(db_path_str).unwrap();
+        // Insert 3 queued messages
+        db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["client_ack", "msg1", 100i64]).unwrap();
+        db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["client_ack", "msg2", 200i64]).unwrap();
+        db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?1, ?2, ?3)", rusqlite::params!["client_ack", "msg3", 300i64]).unwrap();
+
+        // Query IDs
+        let mut stmt = db.prepare("SELECT id FROM queued_messages WHERE receiver_id = ? ORDER BY id ASC").unwrap();
+        let ids: Vec<i64> = stmt.query_map(["client_ack"], |row| row.get(0)).unwrap().flatten().collect();
+        assert_eq!(ids.len(), 3);
+        let id_second = ids[1];
+
+        // Delete up to second message
+        db.execute(
+            "DELETE FROM queued_messages WHERE receiver_id = ?1 AND id <= ?2",
+            rusqlite::params!["client_ack", id_second],
+        ).unwrap();
+
+        // Verify only 3rd message remains (zero data loss of newer msg3)
+        let remaining: Vec<i64> = stmt.query_map(["client_ack"], |row| row.get(0)).unwrap().flatten().collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0], ids[2]);
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }

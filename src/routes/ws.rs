@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
     http::StatusCode,
     response::IntoResponse,
@@ -22,6 +22,7 @@ use crate::state::AppState;
 
 pub async fn ack_messages_handler(
     Path(client_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
@@ -33,8 +34,17 @@ pub async fn ack_messages_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
+    let up_to_id = params.get("up_to_id").and_then(|s| s.parse::<i64>().ok());
+
     let db = state.db.lock().await;
-    let _ = db.execute("DELETE FROM queued_messages WHERE receiver_id = ?", [&client_id]);
+    if let Some(id_bound) = up_to_id {
+        let _ = db.execute(
+            "DELETE FROM queued_messages WHERE receiver_id = ?1 AND id <= ?2",
+            rusqlite::params![&client_id, id_bound],
+        );
+    } else {
+        let _ = db.execute("DELETE FROM queued_messages WHERE receiver_id = ?1", [&client_id]);
+    }
     StatusCode::OK.into_response()
 }
 
