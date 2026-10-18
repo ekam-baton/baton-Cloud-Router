@@ -230,4 +230,44 @@ mod tests {
         };
         assert!(req_oversized_token.fcm_token.len() > 4096);
     }
+
+    #[test]
+    fn test_decode_jwt_sub() {
+        let secret = "router_secret_test_key_123456";
+        let sub = "client_alpha";
+        let claims = crate::models::Claims {
+            sub: sub.to_string(),
+            exp: Some((std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600) as usize),
+        };
+        let token = jsonwebtoken::encode(
+            &jsonwebtoken::Header::default(),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes())
+        ).unwrap();
+
+        let decoded = crate::auth::decode_jwt_sub(&token, secret);
+        assert_eq!(decoded, Some(sub.to_string()));
+
+        let invalid_decoded = crate::auth::decode_jwt_sub(&token, "wrong_secret");
+        assert_eq!(invalid_decoded, None);
+    }
+
+    #[test]
+    fn test_group_bounds() {
+        let req_valid = crate::models::GroupCreateRequest {
+            creator_id: "creator_1".to_string(),
+            group_name: "Test Group".to_string(),
+            member_ids: vec!["member_1".to_string(), "member_2".to_string()],
+        };
+        assert!(!req_valid.creator_id.trim().is_empty() && req_valid.creator_id.len() <= 128);
+        assert!(!req_valid.group_name.trim().is_empty() && req_valid.group_name.len() <= 100);
+        assert!(req_valid.member_ids.iter().all(|m| !m.trim().is_empty() && m.len() <= 128));
+
+        let req_oversized_name = crate::models::GroupCreateRequest {
+            creator_id: "creator_1".to_string(),
+            group_name: "g".repeat(101),
+            member_ids: vec![],
+        };
+        assert!(req_oversized_name.group_name.len() > 100);
+    }
 }

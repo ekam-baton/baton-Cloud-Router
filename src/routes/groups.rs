@@ -6,8 +6,8 @@ use axum::{
 };
 use std::{collections::HashSet, sync::Arc};
 use tracing::info;
-use crate::auth::verify_jwt;
-use crate::models::{Claims, GroupCreateRequest, GroupCreateResponse, GroupInfo, GroupMemberRequest};
+use crate::auth::{decode_jwt_sub, verify_jwt};
+use crate::models::{GroupCreateRequest, GroupCreateResponse, GroupInfo, GroupMemberRequest};
 use crate::state::AppState;
 
 /// `POST /group/create` — Create a new group. Max 10 members. Creator-only admin.
@@ -24,8 +24,13 @@ pub async fn group_create_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if payload.creator_id.is_empty() || payload.group_name.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "creator_id and group_name required"}))).into_response();
+    if payload.creator_id.trim().is_empty() || payload.creator_id.len() > 128 ||
+       payload.group_name.trim().is_empty() || payload.group_name.len() > 100 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "creator_id (max 128) and group_name (max 100) required"}))).into_response();
+    }
+
+    if payload.member_ids.iter().any(|m| m.trim().is_empty() || m.len() > 128) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid member_id format in group"}))).into_response();
     }
 
     // Count existing groups where this user is the creator
@@ -91,6 +96,11 @@ pub async fn group_join_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
+    if payload.member_id.trim().is_empty() || payload.member_id.len() > 128 ||
+       payload.group_id.trim().is_empty() || payload.group_id.len() > 128 {
+        return (StatusCode::BAD_REQUEST, "Invalid member_id or group_id").into_response();
+    }
+
     let members_json = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
         if group.creator_id != payload.requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can add members").into_response();
@@ -132,6 +142,11 @@ pub async fn group_leave_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
+    if payload.member_id.trim().is_empty() || payload.member_id.len() > 128 ||
+       payload.group_id.trim().is_empty() || payload.group_id.len() > 128 {
+        return (StatusCode::BAD_REQUEST, "Invalid member_id or group_id").into_response();
+    }
+
     let members_json = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
         // Only the creator can remove others; anyone can remove themselves
         if payload.member_id != payload.requester_id && group.creator_id != payload.requester_id {
@@ -163,17 +178,12 @@ pub async fn group_info_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let mut requester_id = None;
-    if let Some(token) = headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "))
-        && let Ok(token_data) = jsonwebtoken::decode::<Claims>(
-            token,
-            &jsonwebtoken::DecodingKey::from_secret(state.jwt_secret.as_bytes()),
-            &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256)
-        ) {
-            requester_id = Some(token_data.claims.sub);
-        }
+    let token = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
+        Some(t) => t,
+        None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+    };
     
-    let req_id = match requester_id {
+    let req_id = match decode_jwt_sub(token, &state.jwt_secret) {
         Some(id) => id,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
     };
@@ -198,6 +208,10 @@ pub async fn group_delete_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let requester = params.get("creator_id").cloned().unwrap_or_default();
+    if requester.trim().is_empty() || requester.len() > 128 || group_id.trim().is_empty() || group_id.len() > 128 {
+        return (StatusCode::BAD_REQUEST, "Invalid parameters").into_response();
+    }
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
         Some(token) => verify_jwt(token, &state.jwt_secret, &requester),
         None => false,
@@ -231,6 +245,10 @@ pub async fn group_list_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    if client_id.trim().is_empty() || client_id.len() > 128 {
+        return (StatusCode::BAD_REQUEST, "Invalid client_id").into_response();
+    }
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
         Some(token) => verify_jwt(token, &state.jwt_secret, &client_id),
         None => false,
