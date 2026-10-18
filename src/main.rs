@@ -358,4 +358,28 @@ mod tests {
 
         let _ = std::fs::remove_file(db_path);
     }
+
+    #[test]
+    fn test_rate_limiter_eviction_threshold() {
+        let rate_limiter = dashmap::DashMap::new();
+        let now = std::time::Instant::now();
+        let stale_time = now - std::time::Duration::from_secs(150);
+
+        // Populate with active and stale entries
+        rate_limiter.insert(std::net::IpAddr::from([10, 0, 0, 1]), (5, stale_time));
+        rate_limiter.insert(std::net::IpAddr::from([10, 0, 0, 2]), (2, now));
+        rate_limiter.insert(std::net::IpAddr::from([10, 0, 0, 3]), (1, stale_time));
+
+        assert_eq!(rate_limiter.len(), 3);
+
+        // Run threshold eviction
+        rate_limiter.retain(|_, (_, window_start)| {
+            now.duration_since(*window_start) < std::time::Duration::from_secs(120)
+        });
+
+        assert_eq!(rate_limiter.len(), 1);
+        assert!(rate_limiter.contains_key(&std::net::IpAddr::from([10, 0, 0, 2])));
+        assert!(!rate_limiter.contains_key(&std::net::IpAddr::from([10, 0, 0, 1])));
+        assert!(!rate_limiter.contains_key(&std::net::IpAddr::from([10, 0, 0, 3])));
+    }
 }

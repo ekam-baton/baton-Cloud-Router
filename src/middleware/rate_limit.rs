@@ -35,6 +35,13 @@ pub async fn ip_rate_limit_middleware(
 
     // Perform rate check and immediately drop the DashMap guard before any .await
     let rate_exceeded = {
+        // Active memory-protection guard: prune stale IPs if map exceeds threshold under high-volume scans
+        if state.rate_limiter.len() > 10_000 {
+            state.rate_limiter.retain(|_, (_, window_start)| {
+                now.duration_since(*window_start) < Duration::from_secs(120)
+            });
+        }
+
         let mut entry = state.rate_limiter.entry(ip).or_insert((0, now));
         let (count, window_start) = entry.value_mut();
 
