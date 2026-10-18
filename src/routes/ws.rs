@@ -99,11 +99,31 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
         });
     }
 
-    // Task 1: Forward messages from the MPSC channel into the actual WebSocket.
+    // Task 1: Forward messages from the MPSC channel into the actual WebSocket,
+    // and send periodic 30s ping heartbeats to detect and reap ghost connections.
     let mut send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if sender.send(msg).await.is_err() {
-                break;
+        let mut ping_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+        ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                msg = rx.recv() => {
+                    match msg {
+                        Some(msg) => {
+                            if sender.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = ping_interval.tick() => {
+                    if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });

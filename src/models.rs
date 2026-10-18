@@ -54,9 +54,12 @@ pub struct RegisterPushRequest {
 
 #[derive(Deserialize)]
 pub struct GroupCreateRequest {
+    #[serde(alias = "name")]
     pub group_name: String,
+    #[serde(default)]
     pub creator_id: String,
     /// Initial member client_ids (creator is auto-included)
+    #[serde(alias = "members")]
     pub member_ids: Vec<String>,
 }
 

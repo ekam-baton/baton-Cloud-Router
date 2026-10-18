@@ -270,4 +270,26 @@ mod tests {
         };
         assert!(req_oversized_name.group_name.len() > 100);
     }
+
+    #[test]
+    fn test_group_create_request_deserialization_aliases() {
+        let json_with_aliases = serde_json::json!({
+            "name": "Sovereign Circle",
+            "members": ["client_alpha", "client_beta"]
+        });
+        let parsed: crate::models::GroupCreateRequest = serde_json::from_value(json_with_aliases).unwrap();
+        assert_eq!(parsed.group_name, "Sovereign Circle");
+        assert_eq!(parsed.member_ids, vec!["client_alpha", "client_beta"]);
+        assert!(parsed.creator_id.is_empty());
+
+        let json_standard = serde_json::json!({
+            "group_name": "Executive Board",
+            "creator_id": "founder_1",
+            "member_ids": ["member_a"]
+        });
+        let parsed_std: crate::models::GroupCreateRequest = serde_json::from_value(json_standard).unwrap();
+        assert_eq!(parsed_std.group_name, "Executive Board");
+        assert_eq!(parsed_std.creator_id, "founder_1");
+        assert_eq!(parsed_std.member_ids, vec!["member_a"]);
+    }
 }

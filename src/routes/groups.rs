@@ -16,15 +16,28 @@ pub async fn group_create_handler(
     headers: axum::http::HeaderMap,
     Json(payload): Json<GroupCreateRequest>,
 ) -> impl IntoResponse {
+    let token_sub = headers.get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .and_then(|t| decode_jwt_sub(t, &state.jwt_secret));
+
+    let creator_id = if !payload.creator_id.trim().is_empty() {
+        payload.creator_id.clone()
+    } else if let Some(ref sub) = token_sub {
+        sub.clone()
+    } else {
+        String::new()
+    };
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(token) => verify_jwt(token, &state.jwt_secret, &payload.creator_id),
+        Some(token) => verify_jwt(token, &state.jwt_secret, &creator_id),
         None => false,
     };
     if !is_valid {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if payload.creator_id.trim().is_empty() || payload.creator_id.len() > 128 ||
+    if creator_id.trim().is_empty() || creator_id.len() > 128 ||
        payload.group_name.trim().is_empty() || payload.group_name.len() > 100 {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "creator_id (max 128) and group_name (max 100) required"}))).into_response();
     }
@@ -34,13 +47,13 @@ pub async fn group_create_handler(
     }
 
     // Count existing groups where this user is the creator
-    let creator_count = state.groups.iter().filter(|g| g.value().creator_id == payload.creator_id).count();
+    let creator_count = state.groups.iter().filter(|g| g.value().creator_id == creator_id).count();
     if creator_count >= 50 {
         return (StatusCode::TOO_MANY_REQUESTS, "Maximum 50 groups per user").into_response();
     }
 
     let mut members: HashSet<String> = payload.member_ids.into_iter().collect();
-    members.insert(payload.creator_id.clone()); // Creator is always a member
+    members.insert(creator_id.clone()); // Creator is always a member
 
     if members.len() > 10 {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Maximum 10 members per group"}))).into_response();
@@ -55,7 +68,7 @@ pub async fn group_create_handler(
     let group = GroupInfo {
         id: group_id.clone(),
         name: payload.group_name.clone(),
-        creator_id: payload.creator_id.clone(),
+        creator_id: creator_id.clone(),
         members: members.clone(),
         created_at: now,
     };
