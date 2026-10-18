@@ -253,8 +253,16 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                                             if let Some(fcm_token) = state_clone.push_tokens.get(member_id).map(|t| t.clone()) {
                                                 let http = state_clone.http.clone();
                                                 let server_key = state_clone.firebase_server_key.clone();
+                                                let state_for_fcm = state_clone.clone();
+                                                let target_id = member_id.clone();
                                                 tokio::spawn(async move {
-                                                    send_fcm_wakeup(&http, server_key.as_deref(), &fcm_token).await;
+                                                    let res = send_fcm_wakeup(&http, server_key.as_deref(), &fcm_token).await;
+                                                    if res == crate::services::fcm::FcmWakeupResult::Unregistered {
+                                                        state_for_fcm.push_tokens.remove(&target_id);
+                                                        let db = state_for_fcm.db.lock().await;
+                                                        let _ = db.execute("DELETE FROM push_tokens WHERE client_id = ?1", rusqlite::params![&target_id]);
+                                                        tracing::info!("Pruned unregistered FCM push token for client {}", target_id);
+                                                    }
                                                 });
                                             }
                                         }
@@ -299,8 +307,16 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                                 if let Some(fcm_token) = state_clone.push_tokens.get(&envelope.receiver_id).map(|t| t.clone()) {
                                     let http = state_clone.http.clone();
                                     let server_key = state_clone.firebase_server_key.clone();
+                                    let state_for_fcm = state_clone.clone();
+                                    let target_id = envelope.receiver_id.clone();
                                     tokio::spawn(async move {
-                                        send_fcm_wakeup(&http, server_key.as_deref(), &fcm_token).await;
+                                        let res = send_fcm_wakeup(&http, server_key.as_deref(), &fcm_token).await;
+                                        if res == crate::services::fcm::FcmWakeupResult::Unregistered {
+                                            state_for_fcm.push_tokens.remove(&target_id);
+                                            let db = state_for_fcm.db.lock().await;
+                                            let _ = db.execute("DELETE FROM push_tokens WHERE client_id = ?1", rusqlite::params![&target_id]);
+                                            tracing::info!("Pruned unregistered FCM push token for client {}", target_id);
+                                        }
                                     });
                                 } else {
                                     warn!("No FCM token registered for offline client.");

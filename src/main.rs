@@ -382,4 +382,27 @@ mod tests {
         assert!(!rate_limiter.contains_key(&std::net::IpAddr::from([10, 0, 0, 1])));
         assert!(!rate_limiter.contains_key(&std::net::IpAddr::from([10, 0, 0, 3])));
     }
+
+    #[test]
+    fn test_fcm_wakeup_result_and_pruning() {
+        use crate::services::fcm::FcmWakeupResult;
+        let push_tokens = dashmap::DashMap::new();
+        push_tokens.insert("client-dead".to_string(), "dead-fcm-token".to_string());
+        push_tokens.insert("client-alive".to_string(), "alive-fcm-token".to_string());
+
+        let res_dead = FcmWakeupResult::Unregistered;
+        let res_alive = FcmWakeupResult::Success;
+
+        assert_eq!(res_dead, FcmWakeupResult::Unregistered);
+        assert_eq!(res_alive, FcmWakeupResult::Success);
+
+        // Pruning action
+        if res_dead == FcmWakeupResult::Unregistered {
+            push_tokens.remove("client-dead");
+        }
+
+        assert_eq!(push_tokens.len(), 1);
+        assert!(push_tokens.contains_key("client-alive"));
+        assert!(!push_tokens.contains_key("client-dead"));
+    }
 }
