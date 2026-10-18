@@ -440,4 +440,19 @@ mod tests {
         assert!(updated.creator_id == "member_alice" || updated.creator_id == "member_charlie");
         assert_eq!(updated.members.len(), 2);
     }
+
+    #[test]
+    fn test_contiguous_spool_delivery_bounds() {
+        let items: Vec<(i64, bool)> = vec![(10, true), (20, true), (30, false), (40, true)];
+        let mut max_delivered_id: Option<i64> = None;
+        for (id, send_ok) in items {
+            if send_ok {
+                max_delivered_id = Some(id);
+            } else {
+                break;
+            }
+        }
+        // Since item 30 failed, max_delivered_id should be 20, NOT 40
+        assert_eq!(max_delivered_id, Some(20));
+    }
 }

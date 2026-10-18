@@ -18,8 +18,8 @@ pub async fn turn_credentials_handler(
     }
 
     let shared_secret = match std::env::var("TURN_SHARED_SECRET") {
-        Ok(secret) => secret,
-        Err(_) => return (StatusCode::SERVICE_UNAVAILABLE, "TURN_SHARED_SECRET must be set").into_response(),
+        Ok(secret) if !secret.trim().is_empty() => secret,
+        _ => return (StatusCode::SERVICE_UNAVAILABLE, "TURN_SHARED_SECRET must be set and non-empty").into_response(),
     };
     
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() + 86400; // 24h validity

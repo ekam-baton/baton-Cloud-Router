@@ -94,21 +94,26 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
     };
 
     if !messages_to_send.is_empty() {
-        let mut ids_to_delete = Vec::new();
+        let mut max_delivered_id: Option<i64> = None;
         for (id, payload) in messages_to_send {
             if sender.send(Message::Text(payload.into())).await.is_ok() {
-                ids_to_delete.push(id);
+                max_delivered_id = Some(id);
+            } else {
+                warn!("WebSocket send failed while spooling queued messages to client {}", client_id);
+                break;
             }
         }
-        if let Some(&max_id) = ids_to_delete.last() {
+        if let Some(max_id) = max_delivered_id {
             let state_clone = state.clone();
             let client_id_del = client_id.clone();
             tokio::spawn(async move {
                 let db = state_clone.db.lock().await;
-                let _ = db.execute(
+                if let Err(e) = db.execute(
                     "DELETE FROM queued_messages WHERE receiver_id = ?1 AND id <= ?2",
                     rusqlite::params![&client_id_del, max_id],
-                );
+                ) {
+                    tracing::error!("Failed to delete queued messages for client {}: {}", client_id_del, e);
+                }
             });
         }
     }

@@ -35,11 +35,14 @@ pub async fn register_push_handler(
     tokio::spawn(async move {
         let db = state_clone.db.lock().await;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
-        let _ = db.execute(
+        let res = db.execute(
             "INSERT INTO push_tokens (client_id, fcm_token, updated_at) VALUES (?1, ?2, ?3)
              ON CONFLICT(client_id) DO UPDATE SET fcm_token = excluded.fcm_token, updated_at = excluded.updated_at",
             rusqlite::params![client_id_str, fcm_token_str, now],
         );
+        if let Err(e) = res {
+            tracing::error!("Failed to persist push token for client {}: {}", client_id_str, e);
+        }
     });
 
     info!("📲 Registered FCM push token for client {}", client_id);
