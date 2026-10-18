@@ -405,4 +405,39 @@ mod tests {
         assert!(push_tokens.contains_key("client-alive"));
         assert!(!push_tokens.contains_key("client-dead"));
     }
+
+    #[test]
+    fn test_group_creator_leave_ownership_transfer() {
+        use std::collections::HashSet;
+        use crate::models::GroupInfo;
+
+        let groups = dashmap::DashMap::new();
+        let mut members = HashSet::new();
+        members.insert("creator_bob".to_string());
+        members.insert("member_alice".to_string());
+        members.insert("member_charlie".to_string());
+
+        let group_id = "test_grp_1".to_string();
+        groups.insert(group_id.clone(), GroupInfo {
+            id: group_id.clone(),
+            name: "Team Alpha".to_string(),
+            creator_id: "creator_bob".to_string(),
+            members,
+            created_at: 1000,
+        });
+
+        // Simulate creator_bob leaving
+        {
+            let mut group = groups.get_mut(&group_id).unwrap();
+            group.members.remove("creator_bob");
+            assert!(!group.members.is_empty());
+            let next_creator = group.members.iter().next().cloned().unwrap();
+            group.creator_id = next_creator;
+        }
+
+        let updated = groups.get(&group_id).unwrap();
+        assert!(!updated.members.contains("creator_bob"));
+        assert!(updated.creator_id == "member_alice" || updated.creator_id == "member_charlie");
+        assert_eq!(updated.members.len(), 2);
+    }
 }

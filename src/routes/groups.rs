@@ -163,16 +163,24 @@ pub async fn group_leave_handler(
         return (StatusCode::BAD_REQUEST, "Invalid member_id or group_id").into_response();
     }
 
-    let (members_json, is_empty) = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
+    let (members_json, is_empty, new_creator_opt) = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
         // Only the creator can remove others; anyone can remove themselves
         if payload.member_id != payload.requester_id && group.creator_id != payload.requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can remove other members").into_response();
         }
         group.members.remove(&payload.member_id);
         let empty = group.members.is_empty();
+        let mut new_creator = None;
+        if payload.member_id == group.creator_id && !empty {
+            // Creator left, transfer ownership to the next remaining member so the group is not orphaned
+            if let Some(next_creator) = group.members.iter().next().cloned() {
+                group.creator_id = next_creator.clone();
+                new_creator = Some(next_creator);
+            }
+        }
         let json = serde_json::to_string(&group.members).unwrap_or_default();
         drop(group); // Release DashMap lock before async SQLite I/O
-        (json, empty)
+        (json, empty, new_creator)
     } else {
         return (StatusCode::NOT_FOUND, "Group not found").into_response();
     };
@@ -180,15 +188,29 @@ pub async fn group_leave_handler(
     if is_empty {
         state.groups.remove(&payload.group_id);
         let db = state.db.lock().await;
-        let _ = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![payload.group_id]);
+        if let Err(e) = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![payload.group_id]) {
+            tracing::error!("Failed to delete empty group {} from db: {}", payload.group_id, e);
+        }
         info!("📢 Group {} is now empty — automatically deleted", payload.group_id);
     } else {
         let db = state.db.lock().await;
-        let _ = db.execute(
-            "UPDATE groups SET members_json = ? WHERE group_id = ?",
-            rusqlite::params![members_json, payload.group_id]
-        );
-        info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
+        if let Some(new_creator) = new_creator_opt {
+            if let Err(e) = db.execute(
+                "UPDATE groups SET creator_id = ?, members_json = ? WHERE group_id = ?",
+                rusqlite::params![new_creator, members_json, payload.group_id]
+            ) {
+                tracing::error!("Failed to update group {} creator & members in db: {}", payload.group_id, e);
+            }
+            info!("📢 Creator left; transferred group {} ownership to {}", payload.group_id, new_creator);
+        } else {
+            if let Err(e) = db.execute(
+                "UPDATE groups SET members_json = ? WHERE group_id = ?",
+                rusqlite::params![members_json, payload.group_id]
+            ) {
+                tracing::error!("Failed to update group {} members in db: {}", payload.group_id, e);
+            }
+            info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
+        }
     }
     StatusCode::OK.into_response()
 }
@@ -260,7 +282,9 @@ pub async fn group_delete_handler(
         
         {
             let db = state.db.lock().await;
-            let _ = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![group_id]);
+            if let Err(e) = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![group_id]) {
+                tracing::error!("Failed to delete group {} from db: {}", group_id, e);
+            }
         }
         
         info!("📢 Group {} deleted by {}", group_id, requester);
