@@ -26,8 +26,13 @@ pub async fn ack_messages_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    let client_id = client_id.trim();
+    if client_id.is_empty() || client_id.len() > 128 || client_id.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "Invalid client_id").into_response();
+    }
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(token) => verify_jwt(token, &state.jwt_secret, &client_id),
+        Some(token) => verify_jwt(token, &state.jwt_secret, client_id),
         None => false,
     };
     if !is_valid {
@@ -40,10 +45,10 @@ pub async fn ack_messages_handler(
     if let Some(id_bound) = up_to_id {
         let _ = db.execute(
             "DELETE FROM queued_messages WHERE receiver_id = ?1 AND id <= ?2",
-            rusqlite::params![&client_id, id_bound],
+            rusqlite::params![client_id, id_bound],
         );
     } else {
-        let _ = db.execute("DELETE FROM queued_messages WHERE receiver_id = ?1", [&client_id]);
+        let _ = db.execute("DELETE FROM queued_messages WHERE receiver_id = ?1", [client_id]);
     }
     StatusCode::OK.into_response()
 }
@@ -54,18 +59,24 @@ pub async fn ws_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    let client_id = client_id.trim();
+    if client_id.is_empty() || client_id.len() > 128 || client_id.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "Invalid client_id").into_response();
+    }
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(token) => verify_jwt(token, &state.jwt_secret, &client_id),
+        Some(token) => verify_jwt(token, &state.jwt_secret, client_id),
         None => false,
     };
     if !is_valid {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    info!("Incoming connection from client: {}", client_id);
+    let client_id_str = client_id.to_string();
+    info!("Incoming connection from client: {}", client_id_str);
     ws.max_message_size(2 * 1024 * 1024)
       .max_frame_size(2 * 1024 * 1024)
-      .on_upgrade(move |socket| handle_socket(socket, client_id, state))
+      .on_upgrade(move |socket| handle_socket(socket, client_id_str, state))
 }
 
 pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppState>) {
@@ -178,14 +189,23 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
 
                     // Sealed Sender: Envelope only requires receiver_id and payload_encrypted
                     if let Ok(mut envelope) = serde_json::from_str::<Envelope>(&text) {
-                        // Validate receiver_id format and bounds
-                        if envelope.receiver_id.trim().is_empty() || envelope.receiver_id.len() > 128 {
+                        // Validate receiver_id format, control characters, bounds, and prevent self-routing
+                        let receiver_id = envelope.receiver_id.trim().to_string();
+                        if receiver_id.is_empty() || receiver_id.len() > 128 || receiver_id.chars().any(|c| c.is_control()) {
                             warn!(
-                                "Malformed or oversized receiver_id '{}' from sender '{}'. Dropping message.",
+                                "Malformed or invalid receiver_id '{}' from sender '{}'. Dropping message.",
                                 envelope.receiver_id, client_id_clone
                             );
                             continue;
                         }
+                        if receiver_id == client_id_clone {
+                            warn!(
+                                "Self-routing dropped: client '{}' attempted to send message to itself.",
+                                client_id_clone
+                            );
+                            continue;
+                        }
+                        envelope.receiver_id = receiver_id;
 
                         // ── Hard Loop Breaker: Recursion Depth / Hop Limit ───
                         const MAX_ROUTER_RECURSION_DEPTH: u32 = 3;

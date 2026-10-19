@@ -24,7 +24,8 @@ pub async fn register_push_handler(
     let client_id = payload.client_id.trim();
     let fcm_token = payload.fcm_token.trim();
 
-    if client_id.is_empty() || client_id.len() > 128 || fcm_token.is_empty() || fcm_token.len() > 4096 {
+    if client_id.is_empty() || client_id.len() > 128 || client_id.chars().any(|c| c.is_control()) ||
+       fcm_token.is_empty() || fcm_token.len() > 4096 || fcm_token.chars().any(|c| c.is_control()) {
         return (StatusCode::BAD_REQUEST, "Invalid client_id or fcm_token bounds").into_response();
     }
     let client_id_str = client_id.to_string();

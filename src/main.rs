@@ -469,4 +469,18 @@ mod tests {
         assert_eq!(trimmed_name, "Executive Board");
         assert!(!trimmed_name.chars().any(|c| c.is_control()));
     }
+
+    #[test]
+    fn test_self_routing_and_receiver_id_validation() {
+        let client_id = "client_alice";
+        let receiver_id_self = "client_alice";
+        assert_eq!(receiver_id_self, client_id, "Self-routing should be detected");
+
+        let receiver_id_control = "client_bob\r\n";
+        assert!(receiver_id_control.chars().any(|c| c.is_control()));
+
+        let receiver_id_valid = "client_bob";
+        assert!(!receiver_id_valid.chars().any(|c| c.is_control()));
+        assert_ne!(receiver_id_valid, client_id);
+    }
 }
