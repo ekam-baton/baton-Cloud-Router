@@ -18,7 +18,7 @@ pub async fn turn_credentials_handler(
     }
 
     let shared_secret = match std::env::var("TURN_SHARED_SECRET") {
-        Ok(secret) if !secret.trim().is_empty() => secret,
+        Ok(secret) if !secret.trim().is_empty() => secret.trim().to_string(),
         _ => return (StatusCode::SERVICE_UNAVAILABLE, "TURN_SHARED_SECRET must be set and non-empty").into_response(),
     };
     
@@ -26,17 +26,23 @@ pub async fn turn_credentials_handler(
     let username = format!("{}:{}", timestamp, uuid::Uuid::new_v4());
     
     type HmacSha1 = Hmac<Sha1>;
-    let mut mac = HmacSha1::new_from_slice(shared_secret.as_bytes()).expect("HMAC can take key of any size");
+    let mut mac = match HmacSha1::new_from_slice(shared_secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to initialize HMAC with TURN secret").into_response(),
+    };
     mac.update(username.as_bytes());
     let password = BASE64.encode(mac.finalize().into_bytes());
+
+    let server_host = std::env::var("TURN_SERVER_HOST")
+        .unwrap_or_else(|_| "router.baton.com:3478".to_string());
 
     Json(TurnCredentialsResponse {
         username,
         password,
         ttl: 86400,
         uris: vec![
-            "turn:router.baton.com:3478?transport=udp".to_string(),
-            "turn:router.baton.com:3478".to_string(),
+            format!("turn:{}?transport=udp", server_host),
+            format!("turn:{}", server_host),
         ],
     }).into_response()
 }

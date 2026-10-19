@@ -483,4 +483,31 @@ mod tests {
         assert!(!receiver_id_valid.chars().any(|c| c.is_control()));
         assert_ne!(receiver_id_valid, client_id);
     }
+
+    #[test]
+    fn test_turn_credentials_hmac_and_server_host() {
+        use hmac::{Hmac, Mac, KeyInit};
+        use sha1::Sha1;
+        use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+        let secret = "test_shared_turn_secret_key_123";
+        let username = "1700000000:user-1234";
+
+        type HmacSha1 = Hmac<Sha1>;
+        let mac_res = HmacSha1::new_from_slice(secret.as_bytes());
+        assert!(mac_res.is_ok(), "HMAC initialization must succeed without panic");
+
+        let mut mac = mac_res.unwrap();
+        mac.update(username.as_bytes());
+        let password = BASE64.encode(mac.finalize().into_bytes());
+        assert!(!password.is_empty());
+
+        let default_host = "router.baton.com:3478";
+        let uris = vec![
+            format!("turn:{}?transport=udp", default_host),
+            format!("turn:{}", default_host),
+        ];
+        assert_eq!(uris.len(), 2);
+        assert!(uris[0].contains("transport=udp"));
+    }
 }
