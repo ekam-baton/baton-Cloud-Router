@@ -22,9 +22,9 @@ pub async fn group_create_handler(
         .and_then(|t| decode_jwt_sub(t, &state.jwt_secret));
 
     let creator_id = if !payload.creator_id.trim().is_empty() {
-        payload.creator_id.clone()
+        payload.creator_id.trim().to_string()
     } else if let Some(ref sub) = token_sub {
-        sub.clone()
+        sub.trim().to_string()
     } else {
         String::new()
     };
@@ -37,12 +37,13 @@ pub async fn group_create_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if creator_id.trim().is_empty() || creator_id.len() > 128 ||
-       payload.group_name.trim().is_empty() || payload.group_name.len() > 100 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "creator_id (max 128) and group_name (max 100) required"}))).into_response();
+    let group_name = payload.group_name.trim().to_string();
+    if creator_id.is_empty() || creator_id.len() > 128 || creator_id.chars().any(|c| c.is_control()) ||
+       group_name.is_empty() || group_name.len() > 100 || group_name.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "creator_id (max 128) and group_name (max 100, no control characters) required"}))).into_response();
     }
 
-    if payload.member_ids.iter().any(|m| m.trim().is_empty() || m.len() > 128) {
+    if payload.member_ids.iter().any(|m| m.trim().is_empty() || m.len() > 128 || m.chars().any(|c| c.is_control())) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid member_id format in group"}))).into_response();
     }
 
@@ -52,7 +53,7 @@ pub async fn group_create_handler(
         return (StatusCode::TOO_MANY_REQUESTS, "Maximum 50 groups per user").into_response();
     }
 
-    let mut members: HashSet<String> = payload.member_ids.into_iter().collect();
+    let mut members: HashSet<String> = payload.member_ids.into_iter().map(|m| m.trim().to_string()).collect();
     members.insert(creator_id.clone()); // Creator is always a member
 
     if members.len() > 10 {
@@ -67,7 +68,7 @@ pub async fn group_create_handler(
 
     let group = GroupInfo {
         id: group_id.clone(),
-        name: payload.group_name.clone(),
+        name: group_name.clone(),
         creator_id: creator_id.clone(),
         members: members.clone(),
         created_at: now,
@@ -80,15 +81,15 @@ pub async fn group_create_handler(
         let db = state.db.lock().await;
         let _ = db.execute(
             "INSERT INTO groups (group_id, name, creator_id, members_json, created_at) VALUES (?, ?, ?, ?, ?)",
-            rusqlite::params![group_id, payload.group_name, creator_id, members_json, now as i64]
+            rusqlite::params![group_id, group_name, creator_id, members_json, now as i64]
         );
     }
     
-    info!("📢 Group '{}' ({}) created by {} with {} members", payload.group_name, group_id, creator_id, members.len());
+    info!("📢 Group '{}' ({}) created by {} with {} members", group_name, group_id, creator_id, members.len());
 
     let response = GroupCreateResponse {
         group_id,
-        name: payload.group_name,
+        name: group_name,
         members: members.into_iter().collect(),
     };
     let json_val = serde_json::to_value(response).unwrap_or_default();
@@ -101,30 +102,35 @@ pub async fn group_join_handler(
     headers: axum::http::HeaderMap,
     Json(payload): Json<GroupMemberRequest>,
 ) -> impl IntoResponse {
+    let requester_id = payload.requester_id.trim().to_string();
+    let member_id = payload.member_id.trim().to_string();
+    let group_id = payload.group_id.trim().to_string();
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(token) => verify_jwt(token, &state.jwt_secret, &payload.requester_id),
+        Some(token) => verify_jwt(token, &state.jwt_secret, &requester_id),
         None => false,
     };
     if !is_valid {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if payload.member_id.trim().is_empty() || payload.member_id.len() > 128 ||
-       payload.group_id.trim().is_empty() || payload.group_id.len() > 128 {
-        return (StatusCode::BAD_REQUEST, "Invalid member_id or group_id").into_response();
+    if member_id.is_empty() || member_id.len() > 128 || member_id.chars().any(|c| c.is_control()) ||
+       group_id.is_empty() || group_id.len() > 128 || group_id.chars().any(|c| c.is_control()) ||
+       requester_id.is_empty() || requester_id.len() > 128 || requester_id.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "Invalid member_id, group_id, or requester_id").into_response();
     }
 
-    let members_json = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
-        if group.creator_id != payload.requester_id {
+    let members_json = if let Some(mut group) = state.groups.get_mut(&group_id) {
+        if group.creator_id != requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can add members").into_response();
         }
-        if group.members.contains(&payload.member_id) {
+        if group.members.contains(&member_id) {
             return (StatusCode::OK, "Member already in group").into_response();
         }
         if group.members.len() >= 10 {
             return (StatusCode::BAD_REQUEST, "Maximum 10 members per group").into_response();
         }
-        group.members.insert(payload.member_id.clone());
+        group.members.insert(member_id.clone());
         let json = serde_json::to_string(&group.members).unwrap_or_default();
         drop(group); // Release DashMap lock before async SQLite I/O
         json
@@ -136,11 +142,11 @@ pub async fn group_join_handler(
         let db = state.db.lock().await;
         let _ = db.execute(
             "UPDATE groups SET members_json = ? WHERE group_id = ?",
-            rusqlite::params![members_json, payload.group_id]
+            rusqlite::params![members_json, group_id]
         );
     }
 
-    info!("📢 Added {} to group {}", payload.member_id, payload.group_id);
+    info!("📢 Added {} to group {}", member_id, group_id);
     StatusCode::OK.into_response()
 }
 
@@ -150,28 +156,33 @@ pub async fn group_leave_handler(
     headers: axum::http::HeaderMap,
     Json(payload): Json<GroupMemberRequest>,
 ) -> impl IntoResponse {
+    let requester_id = payload.requester_id.trim().to_string();
+    let member_id = payload.member_id.trim().to_string();
+    let group_id = payload.group_id.trim().to_string();
+
     let is_valid = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
-        Some(token) => verify_jwt(token, &state.jwt_secret, &payload.requester_id),
+        Some(token) => verify_jwt(token, &state.jwt_secret, &requester_id),
         None => false,
     };
     if !is_valid {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    if payload.member_id.trim().is_empty() || payload.member_id.len() > 128 ||
-       payload.group_id.trim().is_empty() || payload.group_id.len() > 128 {
-        return (StatusCode::BAD_REQUEST, "Invalid member_id or group_id").into_response();
+    if member_id.is_empty() || member_id.len() > 128 || member_id.chars().any(|c| c.is_control()) ||
+       group_id.is_empty() || group_id.len() > 128 || group_id.chars().any(|c| c.is_control()) ||
+       requester_id.is_empty() || requester_id.len() > 128 || requester_id.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "Invalid member_id, group_id, or requester_id").into_response();
     }
 
-    let (members_json, is_empty, new_creator_opt) = if let Some(mut group) = state.groups.get_mut(&payload.group_id) {
+    let (members_json, is_empty, new_creator_opt) = if let Some(mut group) = state.groups.get_mut(&group_id) {
         // Only the creator can remove others; anyone can remove themselves
-        if payload.member_id != payload.requester_id && group.creator_id != payload.requester_id {
+        if member_id != requester_id && group.creator_id != requester_id {
             return (StatusCode::FORBIDDEN, "Only the group creator can remove other members").into_response();
         }
-        group.members.remove(&payload.member_id);
+        group.members.remove(&member_id);
         let empty = group.members.is_empty();
         let mut new_creator = None;
-        if payload.member_id == group.creator_id && !empty {
+        if member_id == group.creator_id && !empty {
             // Creator left, transfer ownership to the next remaining member so the group is not orphaned
             if let Some(next_creator) = group.members.iter().next().cloned() {
                 group.creator_id = next_creator.clone();
@@ -186,30 +197,30 @@ pub async fn group_leave_handler(
     };
 
     if is_empty {
-        state.groups.remove(&payload.group_id);
+        state.groups.remove(&group_id);
         let db = state.db.lock().await;
-        if let Err(e) = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![payload.group_id]) {
-            tracing::error!("Failed to delete empty group {} from db: {}", payload.group_id, e);
+        if let Err(e) = db.execute("DELETE FROM groups WHERE group_id = ?", rusqlite::params![group_id]) {
+            tracing::error!("Failed to delete empty group {} from db: {}", group_id, e);
         }
-        info!("📢 Group {} is now empty — automatically deleted", payload.group_id);
+        info!("📢 Group {} is now empty — automatically deleted", group_id);
     } else {
         let db = state.db.lock().await;
         if let Some(new_creator) = new_creator_opt {
             if let Err(e) = db.execute(
                 "UPDATE groups SET creator_id = ?, members_json = ? WHERE group_id = ?",
-                rusqlite::params![new_creator, members_json, payload.group_id]
+                rusqlite::params![new_creator, members_json, group_id]
             ) {
-                tracing::error!("Failed to update group {} creator & members in db: {}", payload.group_id, e);
+                tracing::error!("Failed to update group {} creator & members in db: {}", group_id, e);
             }
-            info!("📢 Creator left; transferred group {} ownership to {}", payload.group_id, new_creator);
+            info!("📢 Creator left; transferred group {} ownership to {}", group_id, new_creator);
         } else {
             if let Err(e) = db.execute(
                 "UPDATE groups SET members_json = ? WHERE group_id = ?",
-                rusqlite::params![members_json, payload.group_id]
+                rusqlite::params![members_json, group_id]
             ) {
-                tracing::error!("Failed to update group {} members in db: {}", payload.group_id, e);
+                tracing::error!("Failed to update group {} members in db: {}", group_id, e);
             }
-            info!("📢 Removed {} from group {}", payload.member_id, payload.group_id);
+            info!("📢 Removed {} from group {}", member_id, group_id);
         }
     }
     StatusCode::OK.into_response()
@@ -221,6 +232,11 @@ pub async fn group_info_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    let group_id = group_id.trim().to_string();
+    if group_id.is_empty() || group_id.len() > 128 || group_id.chars().any(|c| c.is_control()) {
+        return (StatusCode::BAD_REQUEST, "Invalid group_id").into_response();
+    }
+
     let token = match headers.get("Authorization").and_then(|h| h.to_str().ok()).and_then(|h| h.strip_prefix("Bearer ")) {
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -251,17 +267,19 @@ pub async fn group_delete_handler(
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     let requester = if let Some(c) = params.get("creator_id").filter(|s| !s.trim().is_empty()) {
-        c.clone()
+        c.trim().to_string()
     } else if let Some(sub) = headers.get("Authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
         .and_then(|t| decode_jwt_sub(t, &state.jwt_secret)) {
-        sub
+        sub.trim().to_string()
     } else {
         String::new()
     };
 
-    if requester.trim().is_empty() || requester.len() > 128 || group_id.trim().is_empty() || group_id.len() > 128 {
+    let group_id = group_id.trim().to_string();
+    if requester.is_empty() || requester.len() > 128 || requester.chars().any(|c| c.is_control()) ||
+       group_id.is_empty() || group_id.len() > 128 || group_id.chars().any(|c| c.is_control()) {
         return (StatusCode::BAD_REQUEST, "Invalid parameters").into_response();
     }
 
@@ -300,7 +318,8 @@ pub async fn group_list_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    if client_id.trim().is_empty() || client_id.len() > 128 {
+    let client_id = client_id.trim().to_string();
+    if client_id.is_empty() || client_id.len() > 128 || client_id.chars().any(|c| c.is_control()) {
         return (StatusCode::BAD_REQUEST, "Invalid client_id").into_response();
     }
 

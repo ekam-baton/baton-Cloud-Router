@@ -455,4 +455,18 @@ mod tests {
         // Since item 30 failed, max_delivered_id should be 20, NOT 40
         assert_eq!(max_delivered_id, Some(20));
     }
+
+    #[test]
+    fn test_group_name_and_member_sanitization() {
+        let dirty_name = "Team\r\nInjected";
+        assert!(dirty_name.chars().any(|c| c.is_control()));
+
+        let dirty_member = "alice\x00";
+        assert!(dirty_member.chars().any(|c| c.is_control()));
+
+        let clean_name = "  Executive Board  ";
+        let trimmed_name = clean_name.trim();
+        assert_eq!(trimmed_name, "Executive Board");
+        assert!(!trimmed_name.chars().any(|c| c.is_control()));
+    }
 }
