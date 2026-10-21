@@ -79,10 +79,12 @@ pub async fn group_create_handler(
     {
         let members_json = serde_json::to_string(&members).unwrap_or_default();
         let db = state.db.lock().await;
-        let _ = db.execute(
+        if let Err(e) = db.execute(
             "INSERT INTO groups (group_id, name, creator_id, members_json, created_at) VALUES (?, ?, ?, ?, ?)",
             rusqlite::params![group_id, group_name, creator_id, members_json, now as i64]
-        );
+        ) {
+            tracing::error!("Failed to persist group {} to db: {}", group_id, e);
+        }
     }
     
     info!("📢 Group '{}' ({}) created by {} with {} members", group_name, group_id, creator_id, members.len());
@@ -140,10 +142,12 @@ pub async fn group_join_handler(
 
     {
         let db = state.db.lock().await;
-        let _ = db.execute(
+        if let Err(e) = db.execute(
             "UPDATE groups SET members_json = ? WHERE group_id = ?",
             rusqlite::params![members_json, group_id]
-        );
+        ) {
+            tracing::error!("Failed to update group {} members in db: {}", group_id, e);
+        }
     }
 
     info!("📢 Added {} to group {}", member_id, group_id);

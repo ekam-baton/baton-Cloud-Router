@@ -277,8 +277,8 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
 
                                                 if count >= 1000 {
                                                     warn!("Queue full for client {}, dropping message", member_id);
-                                                } else {
-                                                    let _ = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![member_id, &authenticated_text, now]);
+                                                } else if let Err(e) = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![member_id, &authenticated_text, now]) {
+                                                    tracing::error!("Failed to queue group offline message for member {}: {}", member_id, e);
                                                 }
                                             }
 
@@ -330,8 +330,8 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
 
                                     if count >= 1000 {
                                         warn!("Queue full for client {}, dropping message", envelope.receiver_id);
-                                    } else {
-                                        let _ = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![&envelope.receiver_id, &authenticated_text, now]);
+                                    } else if let Err(e) = db.execute("INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)", rusqlite::params![&envelope.receiver_id, &authenticated_text, now]) {
+                                        tracing::error!("Failed to queue offline message for client {}: {}", envelope.receiver_id, e);
                                     }
                                 }
 

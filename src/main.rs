@@ -525,4 +525,44 @@ mod tests {
         assert_eq!(uris.len(), 2);
         assert!(uris[0].contains("transport=udp"));
     }
+
+    #[test]
+    fn test_group_and_queue_sqlite_persistence() {
+        let db_path = std::env::temp_dir().join(format!("test_persistence_{}.db", uuid::Uuid::new_v4()));
+        let db_path_str = db_path.to_str().unwrap();
+
+        let (db, _groups, _tokens) = crate::db::init_db(db_path_str).unwrap();
+
+        // Test group persistence
+        let group_id = "grp_test_123";
+        let group_name = "Engineers";
+        let creator_id = "alice";
+        let members: std::collections::HashSet<String> = vec!["alice".to_string(), "bob".to_string()].into_iter().collect();
+        let members_json = serde_json::to_string(&members).unwrap();
+        let now = 1000000i64;
+
+        let res = db.execute(
+            "INSERT INTO groups (group_id, name, creator_id, members_json, created_at) VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params![group_id, group_name, creator_id, members_json, now],
+        );
+        assert!(res.is_ok(), "Group insertion should succeed");
+
+        // Test group update
+        let updated_members: std::collections::HashSet<String> = vec!["alice".to_string(), "bob".to_string(), "charlie".to_string()].into_iter().collect();
+        let updated_json = serde_json::to_string(&updated_members).unwrap();
+        let res_update = db.execute(
+            "UPDATE groups SET members_json = ? WHERE group_id = ?",
+            rusqlite::params![updated_json, group_id],
+        );
+        assert!(res_update.is_ok(), "Group update should succeed");
+
+        // Test queued message insertion
+        let queue_res = db.execute(
+            "INSERT INTO queued_messages (receiver_id, payload, created_at) VALUES (?, ?, ?)",
+            rusqlite::params!["bob", "sealed_envelope_data", now],
+        );
+        assert!(queue_res.is_ok(), "Queue insertion should succeed");
+
+        let _ = std::fs::remove_file(db_path);
+    }
 }
