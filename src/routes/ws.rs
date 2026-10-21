@@ -39,7 +39,14 @@ pub async fn ack_messages_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let up_to_id = params.get("up_to_id").and_then(|s| s.parse::<i64>().ok());
+    let up_to_id = if let Some(raw) = params.get("up_to_id") {
+        match raw.parse::<i64>() {
+            Ok(id) if id > 0 => Some(id),
+            _ => return (StatusCode::BAD_REQUEST, "Invalid up_to_id parameter").into_response(),
+        }
+    } else {
+        None
+    };
 
     let db = state.db.lock().await;
     if let Some(id_bound) = up_to_id {

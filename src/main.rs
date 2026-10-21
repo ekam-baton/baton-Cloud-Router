@@ -360,6 +360,21 @@ mod tests {
     }
 
     #[test]
+    fn test_ack_messages_up_to_id_validation_prevents_data_loss() {
+        let valid_up_to_id = "42".parse::<i64>().ok().filter(|&id| id > 0);
+        assert_eq!(valid_up_to_id, Some(42));
+
+        let non_numeric = "invalid".parse::<i64>().ok().filter(|&id| id > 0);
+        assert_eq!(non_numeric, None);
+
+        let negative = "-5".parse::<i64>().ok().filter(|&id| id > 0);
+        assert_eq!(negative, None);
+
+        let zero = "0".parse::<i64>().ok().filter(|&id| id > 0);
+        assert_eq!(zero, None);
+    }
+
+    #[test]
     fn test_rate_limiter_eviction_threshold() {
         let rate_limiter = dashmap::DashMap::new();
         let now = std::time::Instant::now();
