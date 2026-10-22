@@ -524,6 +524,15 @@ mod tests {
         ];
         assert_eq!(uris.len(), 2);
         assert!(uris[0].contains("transport=udp"));
+
+        // Host sanitization test
+        let dirty_host = " turn:relay.baton.com:3478/ ";
+        let sanitized = dirty_host.trim()
+            .trim_start_matches("turn:")
+            .trim_start_matches("turns:")
+            .trim_end_matches('/')
+            .trim();
+        assert_eq!(sanitized, "relay.baton.com:3478");
     }
 
     #[test]

@@ -33,8 +33,18 @@ pub async fn turn_credentials_handler(
     mac.update(username.as_bytes());
     let password = BASE64.encode(mac.finalize().into_bytes());
 
-    let server_host = std::env::var("TURN_SERVER_HOST")
+    let raw_server_host = std::env::var("TURN_SERVER_HOST")
         .unwrap_or_else(|_| "router.baton.com:3478".to_string());
+    let trimmed = raw_server_host.trim()
+        .trim_start_matches("turn:")
+        .trim_start_matches("turns:")
+        .trim_end_matches('/')
+        .trim();
+    let server_host = if trimmed.is_empty() {
+        "router.baton.com:3478"
+    } else {
+        trimmed
+    };
 
     Json(TurnCredentialsResponse {
         username,
