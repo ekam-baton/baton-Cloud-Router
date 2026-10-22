@@ -43,6 +43,10 @@ pub async fn group_create_handler(
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "creator_id (max 128) and group_name (max 100, no control characters) required"}))).into_response();
     }
 
+    if payload.member_ids.len() > 10 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Maximum 10 members per group"}))).into_response();
+    }
+
     if payload.member_ids.iter().any(|m| m.trim().is_empty() || m.len() > 128 || m.chars().any(|c| c.is_control())) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Invalid member_id format in group"}))).into_response();
     }
@@ -51,10 +55,6 @@ pub async fn group_create_handler(
     let creator_count = state.groups.iter().filter(|g| g.value().creator_id == creator_id).count();
     if creator_count >= 50 {
         return (StatusCode::TOO_MANY_REQUESTS, "Maximum 50 groups per user").into_response();
-    }
-
-    if payload.member_ids.len() > 10 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Maximum 10 members per group"}))).into_response();
     }
 
     let mut members: HashSet<String> = payload.member_ids.into_iter().map(|m| m.trim().to_string()).collect();
