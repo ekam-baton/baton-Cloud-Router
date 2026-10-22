@@ -49,15 +49,25 @@ pub async fn ack_messages_handler(
     };
 
     let db = state.db.lock().await;
-    if let Some(id_bound) = up_to_id {
-        let _ = db.execute(
+    let delete_res = if let Some(id_bound) = up_to_id {
+        db.execute(
             "DELETE FROM queued_messages WHERE receiver_id = ?1 AND id <= ?2",
             rusqlite::params![client_id, id_bound],
-        );
+        )
     } else {
-        let _ = db.execute("DELETE FROM queued_messages WHERE receiver_id = ?1", [client_id]);
+        db.execute("DELETE FROM queued_messages WHERE receiver_id = ?1", [client_id])
+    };
+
+    match delete_res {
+        Ok(count) => {
+            tracing::info!("Purged {} acknowledged offline messages for client {}", count, client_id);
+            StatusCode::OK.into_response()
+        }
+        Err(e) => {
+            tracing::error!("Database error purging acknowledged messages for client {}: {}", client_id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to purge acknowledged messages").into_response()
+        }
     }
-    StatusCode::OK.into_response()
 }
 
 pub async fn ws_handler(
@@ -292,8 +302,11 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                                                     if res == crate::services::fcm::FcmWakeupResult::Unregistered {
                                                         state_for_fcm.push_tokens.remove(&target_id);
                                                         let db = state_for_fcm.db.lock().await;
-                                                        let _ = db.execute("DELETE FROM push_tokens WHERE client_id = ?1", rusqlite::params![&target_id]);
-                                                        tracing::info!("Pruned unregistered FCM push token for client {}", target_id);
+                                                        if let Err(e) = db.execute("DELETE FROM push_tokens WHERE client_id = ?1", rusqlite::params![&target_id]) {
+                                                            tracing::warn!("Failed to delete unregistered push token for {}: {}", target_id, e);
+                                                        } else {
+                                                            tracing::info!("Pruned unregistered FCM push token for client {}", target_id);
+                                                        }
                                                     }
                                                 });
                                             }
@@ -346,8 +359,11 @@ pub async fn handle_socket(socket: WebSocket, client_id: String, state: Arc<AppS
                                         if res == crate::services::fcm::FcmWakeupResult::Unregistered {
                                             state_for_fcm.push_tokens.remove(&target_id);
                                             let db = state_for_fcm.db.lock().await;
-                                            let _ = db.execute("DELETE FROM push_tokens WHERE client_id = ?1", rusqlite::params![&target_id]);
-                                            tracing::info!("Pruned unregistered FCM push token for client {}", target_id);
+                                            if let Err(e) = db.execute("DELETE FROM push_tokens WHERE client_id = ?1", rusqlite::params![&target_id]) {
+                                                tracing::warn!("Failed to delete unregistered push token for {}: {}", target_id, e);
+                                            } else {
+                                                tracing::info!("Pruned unregistered FCM push token for client {}", target_id);
+                                            }
                                         }
                                     });
                                 } else {
